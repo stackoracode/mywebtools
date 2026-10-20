@@ -1,0 +1,4 @@
+# Speech-to-text (video/audio -> text). ~CPU int8 on aarch64 works well with tiny/base/small models.
+faster-whisper>=1.0
+# Read iPhone HEIC photos in "Images to PDF".
+pillow-heif>=0.16

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111318" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>My Web Tools</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="#/" class="brand" data-i18n="app.title">My Web Tools</a>
+    <div class="topbar-actions">
+      <select id="lang" aria-label="Language"></select>
+      <button id="theme" class="icon-btn" type="button" aria-label="Theme">◐</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+  <main id="view" class="view" tabindex="-1"></main>
+
+  <nav class="tabbar" aria-label="Main">
+    <a href="#/" data-nav="home"><span class="ico">▦</span><span data-i18n="nav.tools">Tools</span></a>
+    <a href="#/jobs" data-nav="jobs"><span class="ico">≡</span><span data-i18n="nav.jobs">Jobs</span><b id="jobs-badge" hidden></b></a>
+    <a href="#/admin" data-nav="admin"><span class="ico">⚙</span><span data-i18n="nav.admin">Admin</span></a>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="login" class="sheet">
+    <form method="dialog" id="login-form">
+      <h2 data-i18n="auth.title">Sign in</h2>
+      <input type="password" name="password" autocomplete="current-password" required data-i18n-placeholder="auth.password">
+      <p class="error" id="login-error" hidden></p>
+      <button class="btn primary block" data-i18n="auth.submit">Sign in</button>
+    </form>
+  </dialog>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
