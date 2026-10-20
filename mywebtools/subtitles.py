@@ -119,7 +119,8 @@ def fit_cues(cues: list[Cue], max_chars: int, max_lines: int = 2) -> list[Cue]:
 
 
 def _weight(text: str) -> int:
-    return len(re.sub(r"\s+", "", text)) or 1
+    """Spoken-length proxy: letters and digits only (recognised speech has different punctuation)."""
+    return len(re.findall(r"[^\W_]", text)) or 1
 
 
 def align_script(chunks: list[str], segments: list[dict[str, Any]], duration: float) -> list[Cue]:

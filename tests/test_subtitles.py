@@ -78,3 +78,9 @@ def test_ai_edit_rejects_count_mismatch():
 
 def test_auto_max_chars_depends_on_script():
     assert subtitles.auto_max_chars("中文字幕测试", 1080, 64) < subtitles.auto_max_chars("English subtitle", 1080, 64)
+
+
+def test_alignment_ignores_punctuation():
+    segments = [{"start": 0.0, "end": 1.0, "text": "大家好"}, {"start": 2.0, "end": 3.0, "text": "今天去海边"}]
+    cues = subtitles.align_script(["大家好。", "今天去海边！"], segments, 3.0)
+    assert cues[1].start == pytest.approx(2.0, abs=0.01)
