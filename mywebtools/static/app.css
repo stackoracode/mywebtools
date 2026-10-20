@@ -223,3 +223,18 @@ dialog.sheet { border: none; border-radius: var(--radius); padding: 20px; width:
 dialog.sheet::backdrop { background: rgba(0, 0, 0, .45); }
 dialog.sheet form { display: flex; flex-direction: column; gap: 12px; }
 .empty { text-align: center; color: var(--muted); padding: 32px 0; }
+
+/* subtitle review */
+dialog.sheet.review { width: min(760px, calc(100% - 16px)); max-height: calc(100dvh - 24px); }
+.review-list { display: flex; flex-direction: column; gap: 8px; max-height: 52dvh; overflow: auto; padding-right: 2px; }
+.review-row { display: grid; grid-template-columns: 1fr; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+@media (min-width: 640px) { .review-row { grid-template-columns: 150px 1fr auto; align-items: start; } }
+.review-times { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.review-times input { width: 100px; min-height: 36px; padding: 4px 6px; font-variant-numeric: tabular-nums; }
+@media (min-width: 640px) { .review-times { flex-direction: column; align-items: stretch; } .review-times input { width: 100%; } }
+.review-row textarea { min-height: 44px; }
+.review-actions { display: flex; gap: 4px; }
+.review-srt { min-height: 50dvh; font-family: ui-monospace, monospace; font-size: 14px; }
+.review-callout { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.state.review { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }

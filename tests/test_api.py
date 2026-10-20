@@ -139,7 +139,7 @@ def test_zh_cn_catalog_covers_ui_and_tools():
                 keys.append(f"tool.{tool.id}.p.{p['name']}")
             if p.get("help"):
                 keys.append(f"tool.{tool.id}.h.{p['name']}")
-            if p["name"] not in ("ocr_langs", "language"):
+            if p["name"] not in ("ocr_langs", "language", "sub_language"):
                 keys += [f"tool.{tool.id}.o.{p['name']}.{v}" for v, label in p.get("options", []) if label != v]
         missing += [k for k in keys if k not in zh]
     assert not missing, missing

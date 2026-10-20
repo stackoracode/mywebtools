@@ -15,10 +15,10 @@ for arg in "$@"; do
   esac
 done
 
-echo "==> System packages (ffmpeg, tesseract + language packs, SMB client)"
+echo "==> System packages (ffmpeg, tesseract + language packs, SMB client, CJK subtitle fonts)"
 sudo apt-get update
 sudo apt-get install -y ffmpeg tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
-  tesseract-ocr-jpn tesseract-ocr-kor cifs-utils curl ca-certificates
+  tesseract-ocr-jpn tesseract-ocr-kor cifs-utils curl ca-certificates fonts-noto-cjk
 
 echo "==> uv + Python 3.11 (Ubuntu 20.04 ships 3.8, too old for current wheels)"
 if ! command -v uv >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uv" ]; then

@@ -3,7 +3,7 @@
 
 import { api, errorText, fmtBytes, h, languageName, state, storage, t, toast, uploadFile } from "./core.js";
 
-const LANGUAGE_PARAMS = new Set(["ocr_langs", "language"]);
+const LANGUAGE_PARAMS = new Set(["ocr_langs", "language", "sub_language"]);
 
 export async function renderToolForm(tool, mount, hooks = {}) {
   const tid = tool.id;

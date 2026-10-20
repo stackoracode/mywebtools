@@ -29,6 +29,7 @@ async def run_cmd(
     timeout: float | None = None,
     env: dict[str, str] | None = None,
     error_code: str = "media.failed",
+    cwd: Path | None = None,
 ) -> str:
     """Run a command without blocking the loop; kill it if the job is cancelled.
 
@@ -38,7 +39,8 @@ async def run_cmd(
     proc_env = {**os.environ, **(env or {})}
     try:
         proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=proc_env
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=proc_env,
+            cwd=str(cwd) if cwd else None,
         )
     except FileNotFoundError as exc:
         raise ToolError("dependency.missing", name=Path(args[0]).name) from exc

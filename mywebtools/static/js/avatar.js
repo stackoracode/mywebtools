@@ -166,6 +166,20 @@ export function enhanceAvatarForm(ctrl) {
       ctx.save(); shapePath(ctx, v.shape, x + v.border_w / 2, y + v.border_w / 2, w - v.border_w, hh - v.border_w, Math.max(0, v.radius - v.border_w / 2));
       ctx.lineWidth = v.border_w; ctx.strokeStyle = v.border_color; ctx.stroke(); ctx.restore();
     }
+    if (v.subtitles && v.sub_burn) {
+      const size = v.sub_size || 64;
+      const margin = v.sub_margin || (g.ch > g.cw ? Math.round(g.ch * (v.sub_position === "top" ? 0.10 : 0.24)) : Math.round(g.ch * 0.06));
+      const y = v.sub_position === "top" ? margin + size : v.sub_position === "middle" ? g.ch / 2 : g.ch - margin;
+      const text = (v.script || "").trim().split(/[。！？.!?\n]/)[0]?.slice(0, 18) || t("avatar.sub_sample");
+      ctx.save();
+      ctx.font = `${v.sub_bold ? "bold " : ""}${size}px system-ui, "PingFang SC", "Noto Sans CJK SC", sans-serif`;
+      ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+      const w = ctx.measureText(text).width;
+      if (v.sub_box) { ctx.globalAlpha = (v.sub_box_opacity ?? 55) / 100; ctx.fillStyle = v.sub_box_color; ctx.fillRect(g.cw / 2 - w / 2 - size / 4, y - size, w + size / 2, size * 1.25); ctx.globalAlpha = 1; }
+      else if (v.sub_outline) { ctx.lineWidth = v.sub_outline * 2; ctx.strokeStyle = v.sub_outline_color; ctx.lineJoin = "round"; ctx.strokeText(text, g.cw / 2, y); }
+      ctx.fillStyle = v.sub_color; ctx.fillText(text, g.cw / 2, y);
+      ctx.restore();
+    }
     const lines = [`${g.cw}×${g.ch} · ${t(`tool.avatar_pip.o.fit.${g.fit}`, {}, g.fit)}`, `${t("avatar.avatar")}: ${w}×${hh} @ ${x},${y}`];
     if (media.main) lines.push(`${t("avatar.main_video")}: ${media.main.width}×${media.main.height} · ${fmtDuration(media.main.duration)}${media.main.is_hdr ? " · HDR" : ""}`);
     if (src) lines.push(`${t("avatar.avatar")}: ${src.width}×${src.height}${src.duration ? ` · ${fmtDuration(src.duration)}` : ""}`);

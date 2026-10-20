@@ -94,3 +94,34 @@ def test_coerce_clamps_and_drops_unknown():
     tool = Echo()
     clean = tool.coerce({"text": 5, "sleep": "-3", "evil": 1})
     assert clean == {"text": "5", "sleep": -3.0}
+
+
+class Reviewer(Tool):
+    id = "reviewer"
+    lane = "net"
+
+    async def run(self, ctx, params):
+        result = await ctx.request_review("subtitles", {"cues": [{"start": 0, "end": 1, "text": "draft"}]})
+        ctx.set_result({"text": result["cues"][0]["text"]})
+
+
+async def test_review_pauses_until_approved():
+    mgr = JobManager(settings, {"reviewer": Reviewer()}, UploadStore(settings.uploads))
+    await mgr.start()
+    try:
+        job = mgr.submit("reviewer", {}, {})
+        await _wait(job, ("review",))
+        assert job.meta["review_draft"]["cues"][0]["text"] == "draft"
+        with pytest.raises(ToolError):
+            mgr.submit_review("0" * 32, {})
+        mgr.submit_review(job.id, {"cues": [{"start": 0, "end": 1, "text": "edited"}]})
+        await _wait(job)
+        assert job.state == "done" and job.result == {"text": "edited"}
+        again = mgr.retry(job.id)  # a re-run offers the edited draft again
+        assert again.meta["resume_review_draft"]["cues"][0]["text"] == "edited"
+        await _wait(again, ("review",))
+        mgr.cancel(again.id)
+        await _wait(again)
+        assert again.state == "cancelled"
+    finally:
+        await mgr.stop()

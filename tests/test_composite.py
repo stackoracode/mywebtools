@@ -136,3 +136,36 @@ def test_ffmpeg_preview_frame(tmp_path):
     assert img.size == (1080, 1920)
     cx, cy = geo.pos[0] + geo.box[0] // 2, geo.pos[1] + geo.box[1] // 2
     assert min(img.getpixel((cx, cy))) > 200  # white avatar inside the heart
+
+
+def _has_filter(name):
+    import subprocess
+
+    if not HAS_FFMPEG:
+        return False
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True).stdout
+    return f" {name} " in out
+
+
+@pytest.mark.skipif(not _has_filter("ass"), reason="ffmpeg without libass")
+def test_ffmpeg_burns_subtitles(tmp_path):
+    from mywebtools import subtitles
+    from mywebtools.media import ffmpeg_base, run_cmd
+
+    main, avatar = tmp_path / "main.mp4", tmp_path / "avatar.mp4"
+    _make(main, "720x1280", 2, "black", audio=False)
+    _make(avatar, "720x1280", 2, "gray", audio=False)
+    layout = Layout(canvas="shorts_720", size=200, anchor="top_left", safe_area=False)
+    geo = composite.compute_geometry(layout, 720, 1280, 720, 1280)
+    masks = composite.build_masks(layout, geo, tmp_path / "m")
+    style = subtitles.SubStyle(size=80, color="#ffffff", outline=0, position="middle", box=False)
+    (tmp_path / "subs.ass").write_text(subtitles.to_ass([subtitles.Cue(0, 5, "████")], style, 720, 1280), encoding="utf-8")
+    timing = Timing(2, 2, 0, "freeze", 0, 25)
+    graph, _ = composite.build_filter(layout, geo, timing, masks, preview=True, subtitles="subs.ass")
+    out = tmp_path / "frame.png"
+    args = ffmpeg_base() + composite.build_inputs(main, avatar, masks, timing, preview_at=0.5)
+    asyncio.run(run_cmd(args + ["-filter_complex", graph, "-map", "[v]", "-frames:v", "1", str(out)], cwd=tmp_path, timeout=60))
+    img = Image.open(out).convert("L")
+    # the black frame has bright subtitle pixels in the middle band
+    band = img.crop((0, 560, 720, 720))
+    assert max(band.getdata()) > 200

@@ -330,8 +330,12 @@ def _main_chain(geo: Geometry, layout: Layout, tonemap: str | None) -> str:
 
 def build_filter(layout: Layout, geo: Geometry, timing: Timing, masks: MaskFiles, *, tonemap: str | None = None,
                  audio: str = "none", main_volume: float = 1.0, avatar_volume: float = 1.0,
-                 preview: bool = False) -> tuple[str, list[str]]:
-    """Return (filter_complex, maps). Input order: 0 main, 1 avatar, 2 mask, 3 shadow?, 4 border?."""
+                 preview: bool = False, subtitles: str | None = None) -> tuple[str, list[str]]:
+    """Return (filter_complex, maps). Input order: 0 main, 1 avatar, 2 mask, 3 shadow?, 4 border?.
+
+    ``subtitles``: an .ass file name *relative to ffmpeg's working directory*
+    (libass filter arguments are awkward to escape, especially Windows paths).
+    """
     fps = timing.fps
     cw_, ch_, cx_, cy_ = geo.crop
     w, h = geo.box
@@ -378,7 +382,8 @@ def build_filter(layout: Layout, geo: Geometry, timing: Timing, masks: MaskFiles
     if masks.border:
         parts.append(f"{current}[{next_input}:v]overlay={x}:{y}{enable}[s3]")
         current = "[s3]"
-    parts.append(f"{current}format=yuv420p[v]")
+    burn = f"ass={subtitles}," if subtitles else ""
+    parts.append(f"{current}{burn}format=yuv420p[v]")
 
     maps = ["-map", "[v]"]
     ms = int(round(delay * 1000))

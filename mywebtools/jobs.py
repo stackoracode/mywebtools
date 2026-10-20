@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("mywebtools.jobs")
 
-ACTIVE = ("queued", "running")
+ACTIVE = ("queued", "running", "review")
 FINAL = ("done", "failed", "cancelled", "interrupted")
 HISTORY_LIMIT = 300
 
@@ -158,6 +158,27 @@ class JobContext:
         self.job.meta.update(values)
         self.manager.persist()
 
+    async def request_review(self, kind: str, draft: dict[str, Any]) -> dict[str, Any]:
+        """Pause until the user approves (and possibly edits) ``draft`` in the UI.
+
+        The draft is persisted in ``meta`` so an interrupted job can show it again
+        on resume. Holds no CPU slot while waiting.
+        """
+        self.save_meta(review_kind=kind, review_draft=draft)
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.manager._reviews[self.job.id] = future
+        previous = self.job.state
+        self.job.state = "review"
+        self.manager.notify(self.job, force=True)
+        try:
+            result = await future
+        finally:
+            self.manager._reviews.pop(self.job.id, None)
+            self.job.state = previous
+            self.manager.notify(self.job, force=True)
+        self.save_meta(review_draft=result)
+        return result
+
     def check_cancel(self) -> None:
         if self.job.cancel_requested:
             raise asyncio.CancelledError()
@@ -176,6 +197,7 @@ class JobManager:
         self.queues: dict[str, asyncio.Queue[str]] = {}
         self._workers: list[asyncio.Task] = []
         self._running: dict[str, asyncio.Task] = {}
+        self._reviews: dict[str, asyncio.Future] = {}
         self._subscribers: set[asyncio.Queue] = set()
         self._last_notify: dict[str, float] = {}
         self._stopping = False
@@ -256,6 +278,14 @@ class JobManager:
                 self._finish(job, "cancelled")
         return job
 
+    def submit_review(self, job_id: str, data: dict[str, Any]) -> Job:
+        job = self.get(job_id)
+        future = self._reviews.get(job_id)
+        if job.state != "review" or future is None or future.done():
+            raise ToolError("job.not_in_review")
+        future.set_result(data)
+        return job
+
     def retry(self, job_id: str) -> Job:
         old = self.get(job_id)
         if old.state in ACTIVE:
@@ -264,6 +294,8 @@ class JobManager:
         if missing:
             raise ToolError("job.inputs_gone")
         resume = {k: v for k, v in old.meta.items() if k.startswith("resume_")}
+        if old.meta.get("review_draft"):  # offer the last reviewed/edited draft again
+            resume["resume_review_draft"] = old.meta["review_draft"]
         return self.submit(old.tool, old.params, old.files, title=old.title, batch_id=old.batch_id, meta=resume)
 
     def delete(self, job_id: str) -> None:

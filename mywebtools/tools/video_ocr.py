@@ -11,6 +11,7 @@ from PIL import Image, ImageChops, ImageOps
 from .. import ocr
 from ..errors import ToolError
 from ..media import ffmpeg_base, probe, progress_args, run_cmd
+from ..subtitles import Cue, ai_edit
 from ..textclean import clean_text
 from .base import Group, Param, Tool, file_param, register
 from .pdf_tools import ascii_flag, ocr_params
@@ -92,6 +93,8 @@ class VideoOcr(Tool):
                   help="Readings this similar count as the same line / cue."),
             Param("upscale", "bool", "Upscale small text 2x", default=False, group="frames"),
             Param("invert", "bool", "Light text on dark background", default=False, group="frames", advanced=True),
+            Param("ai_fix", "bool", "AI: fix OCR errors", default=False, group="ocr",
+                  help="Sends the recognised lines to the AI model (Admin → AI model) to correct misread characters."),
             *ocr_params(default_dates=True),
         ]
 
@@ -154,6 +157,11 @@ class VideoOcr(Tool):
         timeline = [(i * interval, texts[mapping[i]]) for i in range(len(frames))]
         threshold = params["similarity"] / 100
         cues = merge_cues(timeline, interval, threshold)
+        if params["ai_fix"] and cues:
+            ctx.progress(96, "ocr.ai")
+            fixed = await ai_edit([Cue(a, b, text) for a, b, text in cues], "fix",
+                                  instruction="The text comes from OCR of video frames; fix misread characters.")
+            cues = [(c.start, c.end, c.text) for c in fixed]
         outputs = params["output"] or ["txt"]
         if "txt" in outputs:
             path = ctx.out_path(f"{source.stem}_ocr.txt")

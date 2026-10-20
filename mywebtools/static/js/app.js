@@ -110,8 +110,13 @@ async function boot() {
   state.tools = await api("/api/tools");
   await refreshJobs().catch(() => {});
   connectEvents();
+  const announced = new Set();
   onJobEvent((event) => {
     updateBadge();
+    if (event.type === "job" && event.job.state === "review" && !announced.has(event.job.id)) {
+      announced.add(event.job.id);
+      toast(t("review.ready", { title: event.job.title }), 6000);
+    }
     if (event.type === "job" && ["done", "failed"].includes(event.job.state) && event.job.finished
         && Date.now() / 1000 - event.job.finished < 5) {
       toast(`${event.job.title}: ${t(`state.${event.job.state}`)}`);

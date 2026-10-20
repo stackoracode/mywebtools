@@ -11,7 +11,9 @@ from typing import Any
 from ..config import settings
 from ..errors import ToolError
 from ..i18n import CHINESE_PROMPTS, WHISPER_LANGUAGES
+from ..llm import LLM
 from ..media import extract_audio, probe
+from ..subtitles import TARGET_LANGUAGES, Cue, ai_edit
 from .base import Group, Param, Tool, file_param, register
 from .video_ocr import srt_time
 
@@ -57,8 +59,16 @@ class Transcribe(Tool):
                   show_if={"language": "zh"}),
             Param("task", "select", "Task", default="transcribe",
                   options=[["transcribe", "Transcribe (same language)"], ["translate", "Translate to English"]]),
-            Param("model", "select", "Model", default="base", options=MODELS,
+            Param("model", "select", "Model", default="base", options=MODELS, show_if={"engine": ["auto", "local"]},
                   help="tiny/base are fast on ARM; small is more accurate; bigger needs lots of RAM."),
+            Param("engine", "select", "Recognition engine", default="auto",
+                  options=[["auto", "Auto (local if installed, else AI API)"], ["local", "Local faster-whisper"],
+                           ["api", "AI API (Admin → AI model)"]]),
+            Param("ai", "select", "AI editing", default="none",
+                  options=[["none", "None"], ["fix", "Fix recognition errors & punctuation"], ["translate", "Translate"],
+                           ["bilingual", "Bilingual (original + translation)"]]),
+            Param("ai_target", "select", "Translate to", default="en", show_if={"ai": ["translate", "bilingual"]},
+                  options=[[k, v] for k, v in TARGET_LANGUAGES.items()]),
             Param("formats", "multiselect", "Outputs", default=["txt", "srt"],
                   options=[["txt", "TXT"], ["srt", "SRT"], ["vtt", "VTT"], ["json", "JSON"]]),
             Param("vad", "bool", "Skip silence (VAD)", default=True, group="advanced"),
@@ -71,9 +81,20 @@ class Transcribe(Tool):
         ]
 
     def availability(self):
-        if importlib.util.find_spec("faster_whisper") is None:
-            return False, "dependency.faster_whisper"
+        if importlib.util.find_spec("faster_whisper") is None and not LLM().configured:
+            return False, "dependency.faster_whisper_or_api"
         return True, ""
+
+    @staticmethod
+    def _engine(choice: str) -> str:
+        local = importlib.util.find_spec("faster_whisper") is not None
+        if choice == "local" or (choice == "auto" and local):
+            if not local:
+                raise ToolError("dependency.faster_whisper")
+            return "local"
+        if not LLM().configured:
+            raise ToolError("llm.not_configured")
+        return "api"
 
     async def run(self, ctx, params):
         source = ctx.input("media")
@@ -83,16 +104,35 @@ class Transcribe(Tool):
         wav = ctx.workdir / "audio.wav"
         ctx.progress(0, "stt.audio")
         await extract_audio(source, wav, duration=info.duration, on_progress=lambda f: ctx.progress(5 * f, "stt.audio"))
-        ctx.progress(5, "stt.loading_model", model=params["model"])
-        model = await asyncio.to_thread(_load_model, params["model"])
-
         language = None if params["language"] == "auto" else params["language"]
         prompt = params["prompt"].strip()
         if language == "zh" and params["chinese_script"] in CHINESE_PROMPTS:
             prompt = (CHINESE_PROMPTS[params["chinese_script"]] + " " + prompt).strip()
+        duration = info.duration or 1.0
+        if self._engine(params["engine"]) == "api":
+            ctx.progress(10, "stt.transcribing")
+            segments = await LLM().transcribe(wav, language, prompt)
+            meta = type("Meta", (), {"language": language or "", "duration": duration})()
+        else:
+            segments, meta = await self._local(ctx, params, wav, language, prompt, duration)
+        mode, target = params["ai"], params["ai_target"]
+        if params["task"] == "translate" and self._engine(params["engine"]) == "api" and mode == "none":
+            mode, target = "translate", "en"  # the API transcribes; the model translates
+        if mode != "none" and segments:
+            ctx.progress(97, "stt.ai")
+            cues = await ai_edit([Cue(s["start"], s["end"], s["text"]) for s in segments], mode,
+                                 target=target, context=params["prompt"])
+            segments = [{**seg, "text": cue.text} for seg, cue in zip(segments, cues, strict=True)]
+        lang = getattr(meta, "language", language or "")
+        self._write(ctx, source.stem, segments, params, lang)
+        ctx.set_result({"language": lang, "segments": len(segments),
+                        "duration": round(getattr(meta, "duration", duration), 1)})
+
+    async def _local(self, ctx, params, wav, language, prompt, duration):
+        ctx.progress(5, "stt.loading_model", model=params["model"])
+        model = await asyncio.to_thread(_load_model, params["model"])
         stop = threading.Event()
         loop = asyncio.get_running_loop()
-        duration = info.duration or 1.0
 
         def work():
             segments, meta = model.transcribe(
@@ -108,18 +148,14 @@ class Transcribe(Tool):
                 if params["word_timestamps"] and seg.words:
                     item["words"] = [{"start": round(w.start, 2), "end": round(w.end, 2), "word": w.word} for w in seg.words]
                 items.append(item)
-                loop.call_soon_threadsafe(ctx.progress, 10 + 88 * min(1.0, seg.end / duration), "stt.transcribing")
+                loop.call_soon_threadsafe(ctx.progress, 10 + 85 * min(1.0, seg.end / duration), "stt.transcribing")
             return items, meta
 
         try:
-            segments, meta = await asyncio.to_thread(work)
+            return await asyncio.to_thread(work)
         except asyncio.CancelledError:
             stop.set()
             raise
-        lang = getattr(meta, "language", language or "")
-        self._write(ctx, source.stem, segments, params, lang)
-        ctx.set_result({"language": lang, "segments": len(segments),
-                        "duration": round(getattr(meta, "duration", duration), 1)})
 
     @staticmethod
     def _write(ctx, stem: str, segments: list[dict], params: dict, lang: str) -> None:

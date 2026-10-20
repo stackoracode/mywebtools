@@ -12,30 +12,38 @@ as a stand-in so the layout can be tuned before spending credits.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from .. import composite, duix
+from .. import composite, duix, subtitles
 from ..composite import ANCHORS, SHAPES, Layout, Timing
 from ..config import settings
 from ..errors import ToolError
+from ..i18n import WHISPER_LANGUAGES
+from ..llm import EFFORTS, LLM
 from ..media import (
     MediaInfo,
     extract_audio,
     ffmpeg_base,
+    ffmpeg_caps,
     probe,
     progress_args,
     run_cmd,
+    thumbnail,
     tonemap_chain,
     video_encoder_args,
 )
 from ..storage import new_id
+from ..subtitles import TARGET_LANGUAGES, Cue
 from .base import Group, Param, Tool, file_param, register
 from .video_ocr import VIDEO_ACCEPT
 
 AUDIO_ACCEPT = "audio/*,.wav,.mp3,.m4a,.aac,.flac"
+OPENAI_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
+                 "marin", "cedar"]
 
 
 def _labels(values: list[str]) -> list[list[str]]:
@@ -99,13 +107,15 @@ class AvatarPip(Tool):
     name = "Digital avatar PiP"
     description = "Lip-sync a digital avatar to your voice and overlay it on your vlog (Shorts ready)."
     lane = "net"  # mostly waits on the cloud; CPU-heavy steps take the shared CPU slot
-    actions = ("check", "preview")
+    actions = ("check", "preview", "voices")
     groups = [
         Group("source", "Source"),
         Group("canvas", "Output frame"),
         Group("place", "Avatar position & size"),
         Group("style", "Mask & style"),
         Group("crop", "Avatar crop", collapsed=True),
+        Group("subs", "Subtitles"),
+        Group("substyle", "Subtitle style", collapsed=True),
         Group("timing", "Timing & audio", collapsed=True),
         Group("encode", "Encoding", collapsed=True),
     ]
@@ -125,14 +135,67 @@ class AvatarPip(Tool):
             Param("clip", "library", "Lip-sync clip", library="avatar_clips", group="source",
                   show_if={"avatar_source": "clip"}),
             Param("audio_source", "select", "Voice", default="main", group="source", show_if=duix_only,
-                  options=[["main", "Audio of the main video"], ["file", "Separate audio file"]]),
+                  options=[["main", "Audio of the main video"], ["file", "Separate audio file"],
+                           ["tts", "Type a script (AI voice)"]]),
             file_param("audio_file", "Voice audio file", AUDIO_ACCEPT, required=False, group="source",
                        show_if={"audio_source": "file"}),
             Param("audio_start", "number", "Voice from", default=0, min=0, step=0.1, unit="s", group="source",
-                  show_if=duix_only, help="Lip-sync only part of the voice (faster)."),
+                  show_if={"audio_source": ["main", "file"]}, help="Lip-sync only part of the voice (faster)."),
             Param("audio_end", "number", "Voice to", default=0, min=0, step=0.1, unit="s", group="source",
-                  show_if=duix_only, help="0 = until the end"),
+                  show_if={"audio_source": ["main", "file"]}, help="0 = until the end"),
+            Param("script", "textarea", "Script", default="", group="source", remember=False,
+                  help="Text the avatar speaks (AI voice) and/or the exact subtitle text."),
+            Param("tts_voice", "text", "AI voice", default="", group="source", show_if={"audio_source": "tts"},
+                  help="Empty = default from Admin → AI model (e.g. alloy, coral, marin)."),
+            Param("tts_instructions", "textarea", "Speaking style", default="", group="source",
+                  show_if={"audio_source": "tts"}, help="e.g. warm and upbeat vlogger, natural pace"),
+            Param("tts_speed", "range", "Speech speed", default=1.0, min=0.5, max=2.0, step=0.05, group="source",
+                  show_if={"audio_source": "tts"}),
             Param("credits_info", "info", "", group="source", show_if=duix_only),
+            # --- subtitles
+            Param("subtitles", "bool", "Add subtitles", default=True, group="subs"),
+            Param("sub_source", "select", "Subtitle text from", default="auto", group="subs", show_if={"subtitles": True},
+                  options=[["auto", "Auto (script if typed, else speech recognition)"], ["voice", "Speech recognition"],
+                           ["script", "My script (timed to the voice)"]]),
+            Param("sub_language", "select", "Spoken language", default="auto", group="subs",
+                  show_if={"subtitles": True, "sub_source": ["auto", "voice"]},
+                  options=[["auto", "Detect automatically"]] + [[c, c] for c in WHISPER_LANGUAGES]),
+            Param("sub_ai", "select", "AI editing", default="fix", group="subs", show_if={"subtitles": True},
+                  options=[["none", "None"], ["fix", "Fix recognition errors & punctuation"],
+                           ["translate", "Translate"], ["bilingual", "Bilingual (original + translation)"]]),
+            Param("sub_target", "select", "Translate to", default="en", group="subs",
+                  show_if={"subtitles": True, "sub_ai": ["translate", "bilingual"]},
+                  options=[[k, v] for k, v in TARGET_LANGUAGES.items()]),
+            Param("sub_review", "bool", "Review the draft before rendering", default=True, group="subs",
+                  show_if={"subtitles": True},
+                  help="The job pauses at “Review”; edit the lines (or ask the AI to revise) and approve."),
+            Param("sub_burn", "bool", "Burn into the video", default=True, group="subs", show_if={"subtitles": True},
+                  help="An .srt file is always included."),
+            Param("sub_context", "textarea", "Names & terms", default="", group="subs", show_if={"subtitles": True},
+                  advanced=True, help="Helps recognition and AI editing spell names correctly."),
+            Param("sub_effort", "select", "AI reasoning effort", default="", group="subs", show_if={"subtitles": True},
+                  advanced=True, options=[["", "From settings"]] + [[e, e] for e in EFFORTS if e]),
+            Param("sub_font", "text", "Font", default="", group="substyle", show_if={"subtitles": True},
+                  help="Empty = default from settings (Noto Sans CJK SC covers Chinese/Japanese/Korean)."),
+            Param("sub_size", "int", "Font size", default=64, min=16, max=200, unit="px", group="substyle",
+                  show_if={"subtitles": True}),
+            Param("sub_color", "color", "Text colour", default="#ffffff", group="substyle", show_if={"subtitles": True}),
+            Param("sub_outline_color", "color", "Outline colour", default="#000000", group="substyle",
+                  show_if={"subtitles": True, "sub_box": False}),
+            Param("sub_outline", "int", "Outline width", default=4, min=0, max=20, unit="px", group="substyle",
+                  show_if={"subtitles": True, "sub_box": False}),
+            Param("sub_bold", "bool", "Bold", default=True, group="substyle", show_if={"subtitles": True}),
+            Param("sub_box", "bool", "Background box", default=False, group="substyle", show_if={"subtitles": True}),
+            Param("sub_box_color", "color", "Box colour", default="#000000", group="substyle",
+                  show_if={"subtitles": True, "sub_box": True}),
+            Param("sub_box_opacity", "int", "Box opacity", default=55, min=0, max=100, unit="%", group="substyle",
+                  show_if={"subtitles": True, "sub_box": True}),
+            Param("sub_position", "select", "Position", default="bottom", group="substyle", show_if={"subtitles": True},
+                  options=[["bottom", "Bottom"], ["middle", "Middle"], ["top", "Top"]]),
+            Param("sub_margin", "int", "Distance from edge", default=0, min=0, max=1500, unit="px", group="substyle",
+                  show_if={"subtitles": True}, help="0 = automatic (above the Shorts caption area)"),
+            Param("sub_max_chars", "int", "Max characters per line", default=0, min=0, max=80, group="substyle",
+                  show_if={"subtitles": True}, help="0 = automatic from font size and frame width"),
             # --- canvas
             Param("canvas", "select", "Output size", default="shorts", group="canvas",
                   options=[["shorts", "Shorts 1080×1920 (9:16)"], ["shorts_720", "Shorts 720×1280"],
@@ -201,7 +264,7 @@ class AvatarPip(Tool):
             Param("fade_in", "number", "Fade in", default=L.fade_in, min=0, max=5, step=0.1, unit="s", group="timing"),
             Param("fade_out", "number", "Fade out", default=L.fade_out, min=0, max=5, step=0.1, unit="s", group="timing"),
             Param("audio_mix", "select", "Final soundtrack", default="auto", group="timing",
-                  options=[["auto", "Auto (main video audio)"], ["main", "Main video"], ["avatar", "Avatar clip"],
+                  options=[["auto", "Auto (main video; mixed with the AI voice)"], ["main", "Main video"], ["avatar", "Avatar clip"],
                            ["mix", "Mix both"], ["none", "Silent"]]),
             Param("main_volume", "range", "Main volume", default=1.0, min=0, max=2, step=0.05, group="timing",
                   show_if={"audio_mix": "mix"}),
@@ -238,25 +301,52 @@ class AvatarPip(Tool):
         library = ctx.manager.library
         delay = params["avatar_delay"]
         credits_used = 0
+        notes: list[str] = []
+        cw, ch = composite.canvas_size(layout_from(params), minfo.width, minfo.height)
+
         if params["avatar_source"] == "clip":
             if not params["clip"]:
                 raise ToolError("avatar.no_clip")
             clip = library.path(library.get("avatar_clips", params["clip"]))
-            scale = lambda p: p  # noqa: E731
+            cues, sub_offset = [], 0.0
+            if params["subtitles"]:
+                # subtitles follow the soundtrack of the main video (or the clip if the main one is silent)
+                source, sub_offset = (main, 0.0) if minfo.has_audio else (clip, delay)
+                voice = ctx.workdir / "voice.wav"
+                await extract_audio(source, voice)
+                cues = await self._subtitles(ctx, params, voice, (await probe(voice)).duration, cw, notes)
+            scale = lambda p: 30 + p * 0.7  # noqa: E731
         else:
-            clip, used = await self._generate(ctx, params, main, minfo)
-            credits_used = used
-            if params["audio_source"] == "main":
+            if params["audio_source"] in ("main", "file"):
                 delay += params["audio_start"]
+            sub_offset = delay
+            clip, cues, credits_used = await self._lipsync_with_subtitles(ctx, params, main, minfo, cw, notes)
             scale = lambda p: 75 + p * 0.25  # noqa: E731
 
-        out = ctx.out_path(f"{main.stem}_avatar.mp4")
-        notes = await self._compose(ctx, params, main, minfo, clip, out, delay,
-                                    lambda f: ctx.progress(scale(100 * f), "avatar.compose"))
-        ctx.add_output(out, "video")
-        ctx.set_result({"credits_used": credits_used, "notes": notes, "duration": round(minfo.duration, 1)})
+        ass_name = None
+        if cues:
+            srt = ctx.out_path(f"{main.stem}_avatar.srt")
+            srt.write_text(subtitles.to_srt(cues, sub_offset), encoding="utf-8")
+            ctx.add_output(srt, "subtitles")
+            if params["sub_burn"]:
+                if "ass" in ffmpeg_caps()["filters"] or not ffmpeg_caps()["filters"]:
+                    (ctx.workdir / "subs.ass").write_text(
+                        subtitles.to_ass(cues, subtitles.style_from(params), cw, ch, sub_offset), encoding="utf-8")
+                    ass_name = "subs.ass"
+                else:
+                    notes.append("subs.no_libass")
 
-    async def _generate(self, ctx, params, main: Path, minfo: MediaInfo) -> tuple[Path, int]:
+        out = ctx.out_path(f"{main.stem}_avatar.mp4")
+        notes += await self._compose(ctx, params, main, minfo, clip, out, delay,
+                                     lambda f: ctx.progress(scale(100 * f), "avatar.compose"), ass_name)
+        ctx.add_output(out, "video")
+        ctx.set_result({"credits_used": credits_used, "subtitles": len(cues), "notes": notes,
+                        "duration": round(minfo.duration, 1)})
+
+    async def _lipsync_with_subtitles(self, ctx, params, main: Path, minfo: MediaInfo, canvas_w: int,
+                                      notes: list[str]) -> tuple[Path, list[Cue], int]:
+        """Prepare the voice, then run Duix and the subtitle draft/review *concurrently*:
+        the user reviews subtitles while the PC renders the lip-sync."""
         rt = settings.runtime
         library = ctx.manager.library
         if not params["model"]:
@@ -264,8 +354,9 @@ class AvatarPip(Tool):
         item = library.get("avatar_models", params["model"])
         engine = duix.engine()
         resume = ctx.meta.get("resume_duix_task", "") if ctx.meta.get("resume_engine") == engine.name else ""
-
         cloud = engine.name == "duix_cloud"
+
+        voice = ctx.workdir / "voice.wav"
         async with ctx.manager.cpu_slot:
             ctx.progress(1, "avatar.conform")
             fps = rt.duix_upload_fps
@@ -274,8 +365,14 @@ class AvatarPip(Tool):
             model = await conform_model(library.path(item), library.cache_path(item, key), fps=fps,
                                         max_seconds=params["model_max_seconds"], fit=params["model_fit"],
                                         cloud=cloud, height=rt.duix_upload_height)
-            ctx.progress(5, "avatar.audio")
-            voice = ctx.workdir / "voice.wav"
+        ctx.progress(4, "avatar.audio")
+        if params["audio_source"] == "tts":
+            ctx.progress(4, "avatar.tts")
+            spoken = ctx.workdir / "tts.wav"
+            await subtitles.synthesize(params["script"], spoken, ctx.workdir, voice=params["tts_voice"],
+                                       instructions=params["tts_instructions"], speed=params["tts_speed"])
+            await extract_audio(spoken, voice)
+        else:
             source = main if params["audio_source"] == "main" else ctx.input("audio_file")
             if params["audio_source"] == "main" and not minfo.has_audio:
                 raise ToolError("media.no_audio")
@@ -287,20 +384,39 @@ class AvatarPip(Tool):
         ctx.save_meta(_keep_uploads=[u for ids in ctx.job.files.values() for u in ids])
 
         clip = ctx.workdir / "avatar_clip.mp4"
-        await engine.generate(
-            model, voice, clip,
-            progress=lambda p, stage, kw: ctx.progress(8 + 0.67 * p, stage, **kw),
-            save_task=lambda task: ctx.save_meta(resume_duix_task=task, resume_engine=engine.name),
-            task_id=resume,
-            model_name=f"mwt_model_{item.id}_{model.stat().st_size}{model.suffix}",
-        )
+
+        async def lipsync() -> Path:
+            await engine.generate(
+                model, voice, clip,
+                progress=lambda p, stage, kw: ctx.progress(8 + 0.67 * p if p is not None else None, stage, **kw),
+                save_task=lambda task: ctx.save_meta(resume_duix_task=task, resume_engine=engine.name),
+                task_id=resume,
+                model_name=f"mwt_model_{item.id}_{model.stat().st_size}{model.suffix}",
+            )
+            return clip
+
+        async def subs() -> list[Cue]:
+            if not params["subtitles"]:
+                return []
+            return await self._subtitles(ctx, params, voice, voice_info.duration, canvas_w, notes)
+
+        tasks = [asyncio.create_task(lipsync()), asyncio.create_task(subs())]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                task.result()  # re-raise the first failure
+            await asyncio.gather(*pending)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        cues = tasks[1].result()
+
         if params["save_clip"]:
             cinfo = await probe(clip)
             saved = library.add("avatar_clips", clip, f"{item.name} · {time.strftime('%m-%d %H:%M')}",
                                 {"duration": round(cinfo.duration, 1), "width": cinfo.width, "height": cinfo.height,
                                  "model": item.id, "job": ctx.job.id})
-            from ..media import thumbnail
-
             if await thumbnail(library.path(saved), library.thumb_path(saved), at=min(1.0, cinfo.duration / 2)):
                 library.update(saved, has_thumb=True)
             ctx.save_meta(clip_id=saved.id)
@@ -308,10 +424,62 @@ class AvatarPip(Tool):
             raw = ctx.out_path(f"{main.stem}_lipsync.mp4")
             raw.write_bytes(clip.read_bytes())
             ctx.add_output(raw, "clip")
-        return clip, 0 if resume else cost["credits_needed"]
+        return clip, cues, 0 if resume else cost["credits_needed"]
+
+    async def _subtitles(self, ctx, params, voice: Path, duration: float, canvas_w: int,
+                         notes: list[str]) -> list[Cue]:
+        """Build the subtitle draft (speech recognition or script), optional AI edit, then review."""
+        draft = ctx.meta.get("resume_review_draft")
+        style = subtitles.style_from(params)
+        script = params["script"].strip()
+        source = params["sub_source"]
+        if source == "auto":
+            source = "script" if script else "voice"
+        if draft and draft.get("cues"):
+            cues = subtitles.cues_from(draft["cues"])  # resumed job: show the last edited draft again
+        else:
+            ctx.log(f"subtitles from {source}, asr engine {settings.runtime.asr_engine}")
+            context = params["sub_context"]
+            lang = params["sub_language"]
+            if source == "script":
+                if not script:
+                    raise ToolError("subs.no_script")
+                try:
+                    segments = await subtitles.recognize(voice, lang, context)
+                except ToolError as exc:
+                    ctx.log(f"no speech recognition ({exc.code}): spreading the script over the voice")
+                    notes.append("subs.proportional")
+                    segments = []
+                max_chars = style.max_chars or subtitles.auto_max_chars(script, canvas_w, style.size)
+                cues = subtitles.align_script(subtitles.split_script(script, max_chars), segments, duration)
+            else:
+                segments = await subtitles.recognize(voice, lang, context)
+                cues = [Cue(s["start"], s["end"], s["text"]) for s in segments]
+            mode = params["sub_ai"]
+            if mode == "fix" and source == "script":
+                mode = "none"  # typed text is already exact
+            if mode != "none" and cues:
+                try:
+                    cues = await subtitles.ai_edit(cues, mode, target=params["sub_target"], context=context,
+                                                   effort=params["sub_effort"] or None)
+                except ToolError as exc:
+                    if mode in ("translate", "bilingual"):
+                        raise
+                    ctx.log(f"AI fix skipped: {exc.code} {exc.detail[:200]}")
+                    notes.append("subs.ai_skipped")
+            sample = " ".join(c.text for c in cues[:20])
+            max_chars = style.max_chars or subtitles.auto_max_chars(sample, canvas_w, style.size)
+            cues = subtitles.fit_cues(cues, max_chars)
+        if params["sub_review"] and cues:
+            result = await ctx.request_review("subtitles", subtitles.draft_payload(
+                cues, source=source, ai=params["sub_ai"], target=params["sub_target"], canvas_w=canvas_w,
+                max_chars=style.max_chars or subtitles.auto_max_chars(" ".join(c.text for c in cues[:20]),
+                                                                       canvas_w, style.size)))
+            cues = subtitles.cues_from(result.get("cues", []))
+        return cues
 
     async def _compose(self, ctx, params, main: Path, minfo: MediaInfo, clip: Path, out: Path, delay: float,
-                       on_progress) -> list[str]:
+                       on_progress, ass_name: str | None = None) -> list[str]:
         cinfo = await probe(clip)
         layout = layout_from(params)
         geo = composite.compute_geometry(layout, minfo.width, minfo.height, cinfo.width, cinfo.height)
@@ -321,13 +489,15 @@ class AvatarPip(Tool):
         tonemap, note = tonemap_for(minfo, params["hdr"])
         audio = params["audio_mix"]
         if audio == "auto":
-            audio = "main" if minfo.has_audio else ("avatar" if cinfo.has_audio else "none")
+            ai_voice = params["avatar_source"] == "duix" and params["audio_source"] == "tts"
+            audio = ("mix" if ai_voice else "main") if minfo.has_audio else ("avatar" if cinfo.has_audio else "none")
         if audio in ("avatar", "mix") and not cinfo.has_audio:
             audio = "main" if minfo.has_audio else "none"
         if audio == "mix" and not minfo.has_audio:
             audio = "avatar"
         graph, maps = composite.build_filter(layout, geo, timing, masks, tonemap=tonemap, audio=audio,
-                                             main_volume=params["main_volume"], avatar_volume=params["avatar_volume"])
+                                             main_volume=params["main_volume"], avatar_volume=params["avatar_volume"],
+                                             subtitles=ass_name)
         encoder = None if params["encoder"] == "default" else params["encoder"]
         args = ffmpeg_base() + composite.build_inputs(main, clip, masks, timing)
         args += ["-filter_complex", graph] + maps + ["-t", f"{timing.total:.3f}", "-r", f"{timing.fps:g}"]
@@ -337,7 +507,7 @@ class AvatarPip(Tool):
         args += ["-map_metadata", "-1", "-map_chapters", "-1", "-movflags", "+faststart"] + progress_args() + [str(out)]
         ctx.log(f"canvas {geo.canvas_w}x{geo.canvas_h} fit={geo.fit} avatar {geo.box} at {geo.pos} crop {geo.crop}")
         async with ctx.manager.cpu_slot:
-            await run_cmd(args, duration=timing.total, on_progress=on_progress)
+            await run_cmd(args, duration=timing.total, on_progress=on_progress, cwd=ctx.workdir)
         return [n for n in geo.notes + [note] if n]
 
     # ------------------------------------------------------------------
@@ -346,6 +516,8 @@ class AvatarPip(Tool):
             return await self._check(params, files, app)
         if name == "preview":
             return await self._preview(params, files, app)
+        if name == "voices":
+            return {"voices": OPENAI_VOICES, "default": settings.runtime.llm_tts_voice}
         return await super().action(name, params, files, app)
 
     async def _check(self, params, files, app) -> dict[str, Any]:
@@ -364,6 +536,7 @@ class AvatarPip(Tool):
             if params["clip"]:
                 item = app.library.get("avatar_clips", params["clip"])
                 out["clip"] = (await probe(app.library.path(item))).public()
+            self._check_subtitles(params, warn)
             return out
         if params["model"]:
             item = app.library.get("avatar_models", params["model"])
@@ -394,7 +567,27 @@ class AvatarPip(Tool):
                 warn("duix.no_credits")
         except ToolError as exc:
             out["account_error"] = exc.public()
+        if params["audio_source"] == "tts":
+            if not params["script"].strip():
+                warn("subs.no_script")
+            if not LLM().configured:
+                warn("llm.not_configured")
+        self._check_subtitles(params, warn)
         return out
+
+    @staticmethod
+    def _check_subtitles(params, warn) -> None:
+        if not params["subtitles"]:
+            return
+        try:
+            subtitles.asr_engine()
+        except ToolError as exc:
+            if not (params["sub_source"] == "script" and params["script"].strip()):
+                warn(exc.code)
+        if params["sub_ai"] != "none" and not LLM().configured:
+            warn("llm.not_configured")
+        if params["sub_burn"] and ffmpeg_caps()["filters"] and "ass" not in ffmpeg_caps()["filters"]:
+            warn("subs.no_libass")
 
     async def _preview(self, params, files, app) -> dict[str, Any]:
         main_ids = files.get("main_video") or []
@@ -415,12 +608,21 @@ class AvatarPip(Tool):
         at = min(max(params["preview_at"], 0), max(minfo.duration - 0.1, 0))
         timing = Timing(minfo.duration, cinfo.duration, 0.0, "freeze", 0, 30)
         tonemap, _ = tonemap_for(minfo, params["hdr"])
-        graph, _ = composite.build_filter(layout, geo, timing, masks, tonemap=tonemap, preview=True)
+        ass_name = None
+        if params["subtitles"] and params["sub_burn"] and "ass" in (ffmpeg_caps()["filters"] or {"ass"}):
+            style = subtitles.style_from(params)
+            sample = (params["script"].strip() or "Subtitle preview · 字幕预览 · This is how a two-line caption looks")
+            max_chars = style.max_chars or subtitles.auto_max_chars(sample, geo.canvas_w, style.size)
+            chunk = (subtitles.split_script(sample, max_chars) or [sample])[0]
+            cue = subtitles.fit_cues([Cue(0, 3600, chunk)], max_chars)[:1]
+            (folder / "subs.ass").write_text(subtitles.to_ass(cue, style, geo.canvas_w, geo.canvas_h), encoding="utf-8")
+            ass_name = "subs.ass"
+        graph, _ = composite.build_filter(layout, geo, timing, masks, tonemap=tonemap, preview=True, subtitles=ass_name)
         name = f"{folder.name}.jpg"
         args = ffmpeg_base() + composite.build_inputs(main, stand_in, masks, timing, preview_at=at)
         args += ["-filter_complex", graph, "-map", "[v]", "-frames:v", "1", "-q:v", "3", str(settings.tmp / name)]
         async with app.jobs.cpu_slot:
-            await run_cmd(args, timeout=120)
+            await run_cmd(args, timeout=120, cwd=folder)
         return {"image": f"/api/previews/{name}", "canvas": [geo.canvas_w, geo.canvas_h], "fit": geo.fit,
                 "box": list(geo.box), "pos": list(geo.pos), "notes": geo.notes}
 

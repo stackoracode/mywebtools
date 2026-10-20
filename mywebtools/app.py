@@ -26,6 +26,7 @@ from .config import SECRET_KEYS, Runtime, settings, write_secrets
 from .errors import ToolError
 from .i18n import TESSERACT_TO_BCP47, UI_LANGUAGES
 from .jobs import JobManager
+from .llm import EFFORTS, LLM
 from .media import ffmpeg_caps, probe, thumbnail
 from .storage import LIBRARIES, Library, Prefs, UploadStore, new_id
 from .tools import REGISTRY
@@ -118,6 +119,7 @@ def create_app(services: Services | None = None) -> FastAPI:
             "libraries": LIBRARIES,
             "engine": settings.runtime.avatar_engine,
             "os": os.name,
+            "llm": {"configured": LLM().configured, "model": settings.runtime.llm_model, "efforts": EFFORTS},
         }
 
     @app.get("/api/tools")
@@ -206,10 +208,41 @@ def create_app(services: Services | None = None) -> FastAPI:
     async def clear_jobs():
         removed = 0
         for job in list(svc.jobs.jobs.values()):
-            if job.state not in ("queued", "running"):
+            if job.state not in ("queued", "running", "review"):
                 svc.jobs.delete(job.id)
                 removed += 1
         return {"removed": removed}
+
+    @app.get("/api/jobs/{job_id}/review")
+    async def review_draft(job_id: str):
+        job = svc.jobs.get(job_id)
+        return {"state": job.state, "kind": job.meta.get("review_kind", ""), "draft": job.meta.get("review_draft") or {}}
+
+    @app.post("/api/jobs/{job_id}/review")
+    async def review_submit(job_id: str, request: Request):
+        """Approve the (edited) subtitle draft; the paused job continues."""
+        from .subtitles import cues_from
+
+        body = await _json(request)
+        cues = cues_from(body.get("cues") or [])
+        if not cues:
+            raise ToolError("subs.empty")
+        return svc.jobs.submit_review(job_id, {"cues": [c.public() for c in cues]}).public()
+
+    @app.post("/api/jobs/{job_id}/review/revise")
+    async def review_revise(job_id: str, request: Request):
+        """Ask the AI to rework the current draft (fix / translate / follow an instruction)."""
+        from .subtitles import ai_edit, cues_from
+
+        svc.jobs.get(job_id)
+        body = await _json(request)
+        cues = cues_from(body.get("cues") or [])
+        mode = str(body.get("mode") or "revise")
+        if mode not in ("fix", "translate", "bilingual", "revise"):
+            raise ToolError("tool.no_action", action=mode)
+        edited = await ai_edit(cues, mode, target=str(body.get("target") or "en"),
+                               instruction=str(body.get("instruction") or ""), effort=body.get("effort") or None)
+        return {"cues": [c.public() for c in edited]}
 
     @app.get("/api/jobs/{job_id}/files/{name}")
     async def job_file(job_id: str, name: str, inline: int = 0):
@@ -368,6 +401,24 @@ def create_app(services: Services | None = None) -> FastAPI:
         except ToolError as exc:
             return {"valid": False, "ok": False, "error": exc.public()}
 
+    @app.post("/api/llm/models")
+    async def llm_models(request: Request):
+        """Load the model list from the configured (or the given, unsaved) API."""
+        body = await _json(request)
+        client = LLM(base_url=body.get("base_url") or None, api_key=body.get("api_key") or None)
+        return await client.models()
+
+    @app.post("/api/llm/test")
+    async def llm_test(request: Request):
+        body = await _json(request)
+        client = LLM(base_url=body.get("base_url") or None, api_key=body.get("api_key") or None,
+                     provider=body.get("provider") or None, model=body.get("model") or None,
+                     effort=body.get("effort") if body.get("effort") is not None else None)
+        try:
+            return await client.test()
+        except ToolError as exc:
+            return {"ok": False, "error": exc.public()}
+
     @app.get("/api/system")
     async def system():
         caps = ffmpeg_caps()
@@ -387,6 +438,8 @@ def create_app(services: Services | None = None) -> FastAPI:
                        "zscale": "zscale" in caps["filters"],
                        "hw_encoders": sorted(e for e in caps["encoders"] if e.startswith("h264_") or e.startswith("hevc_"))},
             "tesseract": {"available": ocr.available(), "languages": ocr.languages()},
+            "llm": {"configured": LLM().configured, "base_url": settings.runtime.llm_base_url,
+                    "model": settings.runtime.llm_model},
             "tools": {t.id: dict(zip(("available", "reason"), t.availability(), strict=True)) for t in REGISTRY.values()},
             "jobs": svc.jobs.stats(),
         }
@@ -396,7 +449,7 @@ def create_app(services: Services | None = None) -> FastAPI:
         body = await _json(request)
         removed = 0
         if body.get("uploads"):
-            removed += svc.uploads.sweep(0, keep={uid for j in svc.jobs.jobs.values() if j.state in ("queued", "running")
+            removed += svc.uploads.sweep(0, keep={uid for j in svc.jobs.jobs.values() if j.state in ("queued", "running", "review")
                                                   for ids in j.files.values() for uid in ids})
         if body.get("tmp"):
             for path in settings.tmp.iterdir():

@@ -5,8 +5,8 @@ RK3588, Ubuntu 20.04 aarch64) and also runs natively on Windows. Open it on your
 
 | Category | Tools |
 | --- | --- |
-| Digital avatar | **Avatar PiP**: lip-sync a digital avatar to your vlog voice with Duix, then composite it picture-in-picture onto iPhone footage (portrait or landscape, HDR or SDR) for YouTube Shorts |
-| Video & speech | Video on-screen text OCR (TXT / timed SRT) · Speech to text with faster-whisper (TXT/SRT/VTT/JSON, translate to English) |
+| Digital avatar | **Avatar PiP**: lip-sync a digital avatar to your vlog voice (or to a typed script read by an AI voice) with Duix, add reviewed subtitles, and composite it picture-in-picture onto iPhone footage (portrait or landscape, HDR or SDR) for YouTube Shorts |
+| Video & speech | Video on-screen text OCR (TXT / timed SRT, optional AI clean-up) · Speech to text with local faster-whisper or the AI API (TXT/SRT/VTT/JSON, AI fix / translate / bilingual) |
 | PDF | Extract text + images (OCR fallback) · Merge · Split · PDF → images · Images (incl. HEIC) → PDF · Compress |
 | Media | Extract audio · Media info (resolution, orientation, rotation, HDR, codecs) |
 
@@ -101,6 +101,38 @@ x264 preset · encoder (libx264, `h264_rkmpp`, `h264_v4l2m2m`).
 * Masks, borders and shadows are drawn once with Pillow and merged with `alphamerge`. The reference script's per-pixel
   `geq` mask was far too slow on ARM.
 
+## AI model (LLM & speech) and subtitles
+
+Admin → **AI model** configures one OpenAI-compatible API (default: OpenAI):
+
+| Setting | Notes |
+| --- | --- |
+| API style | *OpenAI Responses API* (default) or *Chat Completions* for compatible servers (DeepSeek, Qwen/DashScope, Ollama, vLLM, LM Studio, OpenRouter …) |
+| API URL / key | `https://api.openai.com/v1`; the key is stored only in `.env` (`LLM_API_KEY`) |
+| Model | **Load models** fetches `GET /models`; pick one or type any id (e.g. a new model such as `gpt-6-luna`) |
+| Reasoning effort | model default, none, minimal, low, medium, high, **xhigh**. It is dropped automatically when a model rejects it |
+| Speech | transcription model (`whisper-1`, needs timestamps), TTS model (`gpt-4o-mini-tts`) and default voice |
+| Recognition engine for subtitles | auto (local faster-whisper if installed, else the API) / local / API |
+
+**Test connection** sends a one-word prompt and shows the reply, model, effort and latency.
+
+### Subtitles in the avatar flow
+
+1. **Input as text:** type a **script**. With *Voice → Type a script (AI voice)* the script is spoken by the TTS
+   model and drives the lip-sync. With your own recorded voice, the script is used as the exact subtitle text.
+2. **Draft:** subtitle text comes from your script (timed against the recognised speech, so lines appear when they
+   are said) or from speech recognition. **AI editing** can fix recognition errors and punctuation, translate, or make
+   bilingual subtitles. A *Names & terms* field keeps spellings right.
+3. **Review:** the job pauses in a **Review** state, and the page shows "subtitles ready for review". Meanwhile Duix
+   keeps rendering on the PC. In the editor you can change text and timing, insert/merge/delete lines, edit raw SRT,
+   or ask the AI to *fix*, *translate*, *make bilingual*, or follow a free-form instruction ("shorter, casual tone").
+   Approve, and rendering continues.
+4. **Output:** subtitles are burned in with libass using the chosen font, size, colour, outline or background box,
+   position and margin. On 9:16 they sit above the Shorts caption area by default, and lines wrap per language. An
+   `.srt` file is always included. **Render preview frame** shows the subtitle style too.
+
+Resuming an interrupted job shows your last edited draft again instead of recomputing it.
+
 ## Install on the board (Ubuntu 20.04 aarch64, no Docker)
 
 ```bash
@@ -109,7 +141,8 @@ deploy/install.sh                 # add --with-whisper for speech-to-text
 sudo deploy/mount-duix-share.sh //192.168.8.106/duix_temp <windows-user>
 ```
 
-`install.sh` installs ffmpeg, Tesseract (eng, chi_sim, chi_tra, jpn, kor) and cifs-utils, then uses
+`install.sh` installs ffmpeg, Tesseract (eng, chi_sim, chi_tra, jpn, kor), Noto CJK fonts (for subtitles) and
+cifs-utils, then uses
 [uv](https://docs.astral.sh/uv/) to create a Python 3.11 virtualenv. Ubuntu 20.04's own Python 3.8 is too old for
 current wheels. Finally it installs and starts the `mywebtools` systemd service on port 8080.
 
@@ -192,7 +225,7 @@ API docs: `http://<host>:8080/api/docs`.
 
 ## Notes
 
-* Secrets (`APP_PASSWORD`, optional `DUIX_API_KEY`) are only stored in `.env` (mode 600), never in the repo or
-  `settings.json`.
+* Secrets (`APP_PASSWORD`, `LLM_API_KEY`, optional `DUIX_API_KEY`) are only stored in `.env` (mode 600), never in
+  the repo or `settings.json`.
 * Results are kept for 7 days and unused uploads for 24 h (Admin → Settings). Metadata such as iPhone GPS tags is
   stripped from composited videos.

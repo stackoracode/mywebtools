@@ -1,4 +1,7 @@
 import { api, errorText, fmtBytes, fmtDuration, fmtTime, h, onJobEvent, state, t, toast, toolName } from "./core.js";
+import { openReview } from "./review.js";
+
+const ACTIVE = ["queued", "running", "review"];
 
 const VIDEO = /\.(mp4|mov|webm|m4v)$/i;
 const IMAGE = /\.(png|jpe?g|webp)$/i;
@@ -10,7 +13,7 @@ export function jobCard(job) {
 }
 
 function fillCard(card, job) {
-  const active = job.state === "queued" || job.state === "running";
+  const active = ACTIVE.includes(job.state);
   const pct = job.progress ?? 0;
   const stage = job.stage ? t(`stage.${job.stage}`, job.stage_params, job.stage) : "";
   const elapsed = job.started ? ((job.finished || Date.now() / 1000) - job.started) : 0;
@@ -38,6 +41,8 @@ function fillCard(card, job) {
     h("small", { class: "muted" }, `${toolName(job.tool)} · ${fmtTime(job.created)}${elapsed ? ` · ${fmtDuration(elapsed)}` : ""}`),
     active ? h("div", { class: `bar${job.state === "queued" || job.progress === null ? " indet" : ""}` }, h("i", { style: `width:${pct}%` })) : null,
     active && (stage || job.state === "queued") ? h("small", {}, job.state === "queued" ? t("state.waiting") : `${stage} · ${Math.round(pct)}%`) : null,
+    job.state === "review" ? h("div", { class: "review-callout" }, h("span", {}, t("review.waiting")),
+      h("button", { class: "btn small primary", onclick: () => openReview(job) }, t("review.open"))) : null,
     job.error ? h("p", { class: "error" }, errorText(job.error)) : null,
     result,
     files.length ? h("div", { class: "outputs" }, files) : null,
@@ -112,7 +117,7 @@ export function renderJobs(view) {
   const filters = ["all", "active", "done", "failed"];
   const tabs = h("div", { class: "tabs", role: "tablist" });
   const holder = h("div");
-  const match = (j) => filter === "all" || (filter === "active" ? ["queued", "running"].includes(j.state)
+  const match = (j) => filter === "all" || (filter === "active" ? ACTIVE.includes(j.state)
     : filter === "failed" ? ["failed", "cancelled", "interrupted"].includes(j.state) : j.state === filter);
   const draw = () => {
     tabs.replaceChildren(...filters.map((f) => h("button", { class: "btn small", role: "tab", "aria-selected": String(f === filter),
@@ -123,14 +128,14 @@ export function renderJobs(view) {
     h("div", { class: "row", style: "margin-top:16px" }, h("button", { class: "btn small danger", onclick: async () => {
       if (!confirm(t("jobs.clear_confirm"))) return;
       await api("/api/jobs/clear", { method: "POST" });
-      [...state.jobs.values()].filter((j) => !["queued", "running"].includes(j.state)).forEach((j) => state.jobs.delete(j.id));
+      [...state.jobs.values()].filter((j) => !ACTIVE.includes(j.state)).forEach((j) => state.jobs.delete(j.id));
       draw();
     } }, t("jobs.clear"))));
   draw();
 }
 
 export function updateBadge() {
-  const n = [...state.jobs.values()].filter((j) => j.state === "queued" || j.state === "running").length;
+  const n = [...state.jobs.values()].filter((j) => ACTIVE.includes(j.state)).length;
   const badge = document.getElementById("jobs-badge");
   badge.hidden = !n;
   badge.textContent = n;

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = Path(os.getenv("MWT_ENV_FILE", str(ROOT / ".env")))
 load_dotenv(ENV_FILE)
 
-SECRET_KEYS = ("DUIX_API_KEY", "APP_PASSWORD")
+SECRET_KEYS = ("DUIX_API_KEY", "APP_PASSWORD", "LLM_API_KEY")
 
 
 def _env(name: str, default: str = "") -> str:
@@ -76,6 +76,21 @@ class Runtime:
     duix_upload_fps: int = 25
     duix_delete_remote: bool = False
 
+    # Large language model + speech APIs (OpenAI by default; any compatible server).
+    # The API key is the LLM_API_KEY secret in .env.
+    llm_provider: str = "openai"  # openai (Responses API) | openai_compatible (Chat Completions)
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = ""  # picked from the list loaded from {base}/models, or typed
+    llm_reasoning_effort: str = "medium"  # "" | none | minimal | low | medium | high | xhigh
+    llm_timeout_seconds: int = 600
+    llm_transcribe_model: str = "whisper-1"  # needs segment timestamps for subtitles
+    llm_tts_model: str = "gpt-4o-mini-tts"
+    llm_tts_voice: str = "alloy"
+    # speech recognition used for subtitles: auto = local faster-whisper if installed, else the API
+    asr_engine: str = "auto"  # auto | local | api
+    whisper_model: str = "base"
+    subtitle_font: str = "Noto Sans CJK SC"
+
     def duix_share(self) -> Path:
         if self.duix_share_path:
             return Path(self.duix_share_path)
@@ -99,7 +114,7 @@ class Settings:
     ffprobe: str = field(default_factory=lambda: _env("FFPROBE_CMD", "ffprobe"))
     tesseract: str = field(default_factory=lambda: _env("TESSERACT_CMD", "tesseract"))
     lane_cpu: int = field(default_factory=lambda: _env_int("MWT_LANE_CPU", 1))
-    lane_net: int = field(default_factory=lambda: _env_int("MWT_LANE_NET", 2))
+    lane_net: int = field(default_factory=lambda: _env_int("MWT_LANE_NET", 3))
     lane_light: int = field(default_factory=lambda: _env_int("MWT_LANE_LIGHT", 2))
     runtime: Runtime = field(default_factory=Runtime)
 
