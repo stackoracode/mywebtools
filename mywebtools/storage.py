@@ -150,12 +150,14 @@ def dir_size(path: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Libraries: reusable assets such as avatar base-model videos and generated
-# lip-sync clips (re-compositing a clip costs no cloud credits).
+# Libraries: reusable assets such as avatar base-model videos, generated
+# lip-sync clips (re-compositing a clip costs no cloud credits) and voice
+# samples for voice cloning.
 # ---------------------------------------------------------------------------
 LIBRARIES: dict[str, dict[str, Any]] = {
     "avatar_models": {"accept": "video/*,.mp4,.mov,.webm,.mkv", "kind": "video"},
     "avatar_clips": {"accept": "video/*,.mp4,.mov,.webm", "kind": "video"},
+    "voices": {"accept": "audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.mp4,.mov", "kind": "audio"},
 }
 
 

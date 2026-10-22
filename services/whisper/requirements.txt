@@ -1,0 +1,7 @@
+# faster-whisper service (python 3.10-3.12). GPU: CUDA 12 + cuDNN 9 come from the nvidia-* wheels.
+faster-whisper>=1.1
+fastapi>=0.115
+uvicorn>=0.29
+python-multipart>=0.0.9
+nvidia-cublas-cu12; platform_machine == "AMD64" or platform_machine == "x86_64"
+nvidia-cudnn-cu12==9.*; platform_machine == "AMD64" or platform_machine == "x86_64"

@@ -1,10 +1,18 @@
-// Management UI: avatar engine, runtime settings, libraries, system status, security.
+// Management UI: avatar engine, model services, AI model, runtime settings, libraries, system status, security.
 import { api, errorText, fmtBytes, fmtDuration, h, state, t, toast } from "./core.js";
 import { checkEngine } from "./avatar.js";
 
-const TABS = ["engine", "ai", "settings", "libraries", "system", "security"];
+const TABS = ["engine", "nodes", "ai", "settings", "libraries", "system", "security"];
 const AI_FIELDS = ["llm_provider", "llm_base_url", "llm_model", "llm_reasoning_effort", "llm_timeout_seconds",
-  "llm_transcribe_model", "llm_tts_model", "llm_tts_voice", "asr_engine", "whisper_model", "subtitle_font"];
+  "llm_transcribe_model", "llm_tts_model", "llm_tts_voice", "subtitle_font"];
+// model services on the GPU PC; folders are paths on that PC
+const NODE_FIELDS = {
+  whisper: ["node_whisper_url", "whisper_model_dir", "whisper_device", "whisper_compute_type", "whisper_beam_size"],
+  tts: ["node_tts_url", "indextts_model_dir", "indextts_device", "indextts_bf16"],
+  align: ["node_align_url", "mms_model_dir", "mms_device"],
+};
+const SPEECH_FIELDS = ["asr_engine", "tts_engine", "align_engine", "node_timeout_seconds", "node_free_vram", "whisper_model"];
+const MODEL_FIELDS = [...Object.values(NODE_FIELDS).flat(), ...SPEECH_FIELDS];
 const ENGINE_LOCAL = ["duix_local_url", "duix_windows_dir", "duix_share_path", "duix_timeout_seconds", "duix_poll_seconds",
   "duix_default_model", "duix_cleanup_share", "duix_wol_mac"];
 const ENGINE_CLOUD = ["duix_base_url", "duix_upload_height", "duix_upload_fps", "duix_delete_remote"];
@@ -15,8 +23,14 @@ const SELECTS = {
   avatar_engine: ["duix_local", "duix_cloud"],
   llm_provider: ["openai", "openai_compatible"],
   llm_reasoning_effort: () => state.meta.llm?.efforts || ["", "low", "medium", "high", "xhigh"],
-  asr_engine: ["auto", "local", "api"],
+  asr_engine: ["auto", "node", "local", "api"],
+  tts_engine: ["indextts", "openai"],
+  align_engine: ["auto", "mms", "basic"],
   whisper_model: ["tiny", "base", "small", "medium", "large-v3", "distil-large-v3"],
+  whisper_device: ["auto", "cuda", "cpu"],
+  indextts_device: ["auto", "cuda", "cpu"],
+  mms_device: ["auto", "cuda", "cpu"],
+  whisper_compute_type: ["auto", "float16", "int8_float16", "int8"],
 };
 
 export async function renderAdmin(view, tab = "engine") {
@@ -28,7 +42,7 @@ export async function renderAdmin(view, tab = "engine") {
       class: "btn small", role: "tab", href: `#/admin/${name}`, "aria-selected": String(name === tab) }, t(`admin.${name}`)))),
     body);
   try {
-    await ({ engine, ai, settings, libraries, system, security })[tab](body);
+    await ({ engine, nodes, ai, settings, libraries, system, security })[tab](body);
   } catch (e) { body.replaceChildren(h("p", { class: "error" }, errorText(e.error) || String(e))); }
 }
 
@@ -146,6 +160,100 @@ function cloudStatus(res) {
   ];
 }
 
+// ------------------------------------------------------------------ model services (GPU PC)
+async function nodes(body) {
+  const data = await api("/api/settings");
+  const values = { ...data.values };
+  const fields = Object.fromEntries(data.fields.map((f) => [f.name, f]));
+  let token = "";
+  const statuses = {};
+  const set = (k, v) => { values[k] = v; };
+
+  async function check(kind) {
+    const box = statuses[kind];
+    box.replaceChildren(h("p", { class: "muted" }, "…"));
+    const [urlKey, dirKey] = NODE_FIELDS[kind];
+    const res = await api(`/api/nodes/${kind}/check`, { method: "POST", body: { url: values[urlKey], model_dir: values[dirKey] } })
+      .catch((e) => ({ reachable: false, error: e.error }));
+    box.replaceChildren(...nodeStatus(kind, res));
+  }
+
+  async function save(quiet = false) {
+    try {
+      await api("/api/settings", { method: "PUT", body: { values } });
+      if (token) await api("/api/secrets", { method: "PUT", body: { NODE_TOKEN: token } });
+      if (!quiet) toast(t("ui.saved"));
+      return true;
+    } catch (e) { toast(errorText(e.error)); return false; }
+  }
+
+  async function act(kind, action) {
+    if (!(await save(true))) return;
+    statuses[kind].prepend(h("p", { class: "muted" }, t(`node.${action}ing`)));
+    try {
+      const res = await api(`/api/nodes/${kind}/${action}`, { method: "POST" });
+      toast(action === "load" ? t("node.loaded_in", { s: res.seconds }) : t("node.unloaded"));
+    } catch (e) { toast(errorText(e.error)); }
+    check(kind);
+  }
+
+  const cards = Object.keys(NODE_FIELDS).map((kind) => {
+    statuses[kind] = h("div", { class: "stack" });
+    return h("section", { class: "card stack" },
+      h("h2", { style: "margin:0" }, t(`node.${kind}`)),
+      h("p", { class: "muted", style: "margin:0" }, t(`node.${kind}.intro`)),
+      h("div", { class: "group-body", style: "padding:0" }, ...NODE_FIELDS[kind].map((name) => settingField(fields[name], values, set))),
+      h("div", { class: "row" },
+        h("button", { class: "btn", onclick: () => check(kind) }, t("node.check")),
+        h("button", { class: "btn", onclick: () => act(kind, "load") }, t("node.load")),
+        h("button", { class: "btn", onclick: () => act(kind, "unload") }, t("node.unload"))),
+      statuses[kind]);
+  });
+  const engines = h("section", { class: "card stack" },
+    h("h2", { style: "margin:0" }, t("node.engines")),
+    h("p", { class: "muted", style: "margin:0" }, t("node.engines_intro")),
+    h("div", { class: "group-body", style: "padding:0" },
+      ...SPEECH_FIELDS.map((name) => settingField(fields[name], values, set)),
+      h("div", { class: "field" }, h("label", { for: "s-node-token" }, t("set.NODE_TOKEN")),
+        h("input", { id: "s-node-token", type: "password", autocomplete: "off",
+          placeholder: data.secrets.NODE_TOKEN?.configured ? `${t("set.configured")} ${data.secrets.NODE_TOKEN.hint}` : "",
+          oninput: (e) => { token = e.target.value.trim(); } }),
+        h("div", { class: "help" }, t("set.NODE_TOKEN.help")))),
+    h("div", { class: "row" }, h("span", { class: "spacer" }),
+      h("button", { class: "btn primary", onclick: async () => { if (await save()) Object.keys(NODE_FIELDS).forEach(check); } }, t("ui.save"))));
+  const howto = h("details", { class: "card" }, h("summary", {}, t("node.howto")),
+    h("ol", {}, ...[1, 2, 3, 4].map((n) => h("li", {}, t(`node.howto.${n}`)))),
+    h("pre", { class: "log" }, "powershell -ExecutionPolicy Bypass -File services\\install.ps1\npowershell -ExecutionPolicy Bypass -File services\\start.ps1"));
+  body.replaceChildren(h("p", { class: "muted" }, t("node.intro")), engines, ...cards, howto);
+  Object.keys(NODE_FIELDS).forEach(check);
+}
+
+function nodeStatus(kind, res) {
+  if (!res.reachable) {
+    return [h("div", {}, dot(false), t("node.offline", { url: res.url || "" })), res.error ? h("small", { class: "muted" }, errorText(res.error)) : null];
+  }
+  const model = res.model || {};
+  const rows = [
+    h("div", {}, dot(true), t("node.online", { version: res.version || "?", host: res.host || "", python: res.python || "" })),
+    res.gpu?.length ? h("small", { class: "muted" }, res.gpu.map((g) => t("node.gpu", { name: g.name, free: (g.free_mb / 1024).toFixed(1), total: (g.total_mb / 1024).toFixed(1) })).join(" · "))
+      : h("small", { class: "muted" }, t("node.no_gpu")),
+    res.import_error ? h("div", {}, dot(false), t("node.import_error"), h("small", { class: "muted" }, ` ${res.import_error}`)) : null,
+    h("div", {}, dot(model.ok), model.ok ? t("node.model_ok", { dir: model.dir }) : model.exists ? t("node.model_incomplete", { dir: model.dir })
+      : t(model.error === "model_outside_root" ? "err.node.model_outside_root" : "node.model_missing", { dir: model.dir || res.model_dir || "" })),
+  ];
+  const missing = (model.files || []).filter((f) => !f.ok);
+  if (missing.length) rows.push(h("ul", { class: "warn-list" }, ...missing.map((f) => h("li", {}, f.name))));
+  if (model.ok) rows.push(h("details", {}, h("summary", { class: "muted" }, t("node.files", { n: (model.files || []).length })),
+    h("ul", {}, ...(model.files || []).map((f) => h("li", {}, `✓ ${f.name} · ${fmtBytes(f.size)}`)))));
+  for (const [feature, info] of Object.entries(model.optional || {})) {
+    rows.push(h("div", {}, dot(info.ok), t(`node.${kind}.${feature}.${info.ok ? "ok" : "missing"}`)));
+  }
+  const slot = res.slot || {};
+  rows.push(h("small", { class: "muted" }, slot.loaded ? t("node.slot_loaded", { s: slot.load_seconds ?? "?" }) : t("node.slot_idle", { s: slot.idle_unload_seconds ?? 0 })));
+  if (res.error) rows.push(h("small", { class: "muted" }, errorText(res.error)));
+  return rows;
+}
+
 // ------------------------------------------------------------------ AI model
 async function ai(body) {
   const data = await api("/api/settings");
@@ -211,7 +319,8 @@ async function settings(body) {
   const data = await api("/api/settings");
   const values = { ...data.values };
   const grid = h("div", { class: "group-body", style: "padding:0" },
-    ...data.fields.filter((f) => !f.name.startsWith("duix_") && f.name !== "avatar_engine" && !AI_FIELDS.includes(f.name))
+    ...data.fields.filter((f) => !f.name.startsWith("duix_") && f.name !== "avatar_engine" && !AI_FIELDS.includes(f.name)
+      && !MODEL_FIELDS.includes(f.name))
       .map((f) => settingField(f, values, (k, v) => { values[k] = v; })));
   body.replaceChildren(h("section", { class: "card stack" }, grid,
     h("button", { class: "btn primary", onclick: async () => {

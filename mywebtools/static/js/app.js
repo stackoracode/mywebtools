@@ -10,9 +10,9 @@ import { renderAdmin } from "./admin.js";
 const view = document.getElementById("view");
 const ICONS = {
   "file-text": "📄", layers: "📚", scissors: "✂️", image: "🖼️", "file-plus": "🗂️", minimize: "🗜️", "scan-text": "🔎",
-  mic: "🎙️", music: "🎵", info: "ℹ️", "user-video": "🧑‍💻", tool: "🛠️",
+  mic: "🎙️", music: "🎵", info: "ℹ️", "user-video": "🧑‍💻", tool: "🛠️", speaker: "🗣️", captions: "💬",
 };
-const CATEGORY_ORDER = ["avatar", "video", "pdf", "media", "misc"];
+const CATEGORY_ORDER = ["avatar", "voice", "video", "pdf", "media", "misc"];
 
 // ---------------------------------------------------------------- views
 function renderHome() {

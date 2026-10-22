@@ -232,13 +232,19 @@ export async function renderToolForm(tool, mount, hooks = {}) {
         } catch (err) { toast(errorText(err.error)); } finally { addBtn.disabled = false; addBtn.textContent = t("ui.upload_new"); }
       } });
     const addBtn = h("button", { type: "button", class: "btn small", onclick: () => picker.click() }, t("ui.upload_new"));
-    wrap.append(h("label", { for: id }, label), h("div", { class: "lib-row" }, thumb, select, addBtn, picker), help);
+    const isAudio = state.meta?.libraries?.[p.library]?.kind === "audio";
+    const player = isAudio ? h("audio", { controls: true, preload: "none", hidden: true, style: "width:100%" }) : null;
+    wrap.append(h("label", { for: id }, label), h("div", { class: "lib-row" }, thumb, select, addBtn, picker), player, help);
     let items = [];
 
     function showThumb() {
       const item = items.find((i) => i.id === select.value);
       thumb.hidden = !item?.has_thumb;
       if (item?.has_thumb) thumb.src = `/api/library/${p.library}/${item.id}/thumb`;
+      if (player) {  // voice samples: listen before cloning
+        player.hidden = !item;
+        if (item) player.src = `/api/library/${p.library}/${item.id}/file`;
+      }
       hooks.onLibraryChanged?.(p.name, item);
     }
     async function load(selectId) {

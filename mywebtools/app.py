@@ -21,7 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, duix, ocr
+from . import __version__, duix, nodes, ocr
 from .config import SECRET_KEYS, Runtime, settings, write_secrets
 from .errors import ToolError
 from .i18n import TESSERACT_TO_BCP47, UI_LANGUAGES
@@ -120,6 +120,7 @@ def create_app(services: Services | None = None) -> FastAPI:
             "engine": settings.runtime.avatar_engine,
             "os": os.name,
             "llm": {"configured": LLM().configured, "model": settings.runtime.llm_model, "efforts": EFFORTS},
+            "nodes": list(nodes.KINDS),
         }
 
     @app.get("/api/tools")
@@ -305,6 +306,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         info = await probe(upload.path)
         if LIBRARIES[lib]["kind"] == "video" and not info.has_video:
             raise ToolError("media.no_video")
+        if LIBRARIES[lib]["kind"] == "audio" and not info.has_audio:
+            raise ToolError("media.no_audio")
         item = svc.library.add(lib, upload.path, str(body.get("name") or Path(upload.name).stem), move=True,
                                info={k: v for k, v in info.public().items()
                                      if k in ("duration", "width", "height", "fps", "orientation", "is_hdr", "vcodec")})
@@ -418,6 +421,26 @@ def create_app(services: Services | None = None) -> FastAPI:
             return await client.test()
         except ToolError as exc:
             return {"ok": False, "error": exc.public()}
+
+    # ---- model services on the GPU PC -----------------------------------
+    @app.get("/api/nodes")
+    async def nodes_health():
+        kinds = list(nodes.KINDS)
+        results = await asyncio.gather(*(nodes.Node(k).health() for k in kinds))
+        return dict(zip(kinds, results, strict=True))
+
+    @app.post("/api/nodes/{kind}/check")
+    async def node_check(kind: str, request: Request):
+        """Health of one service with the given (unsaved) URL / model folder."""
+        body = await _json(request)
+        return await nodes.Node(kind, url=body.get("url") or None, model_dir=body.get("model_dir") or None).health()
+
+    @app.post("/api/nodes/{kind}/{action}")
+    async def node_action(kind: str, action: str):
+        if action not in ("load", "unload"):
+            raise ToolError("tool.no_action", action=action)
+        node = nodes.Node(kind)
+        return await (node.load() if action == "load" else node.unload())
 
     @app.get("/api/system")
     async def system():

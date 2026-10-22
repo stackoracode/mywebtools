@@ -1,12 +1,16 @@
 # mywebtools
 
-A personal, mobile-first web toolbox that runs on a small ARM Linux board (tested target: LubanCat 5,
-RK3588, Ubuntu 20.04 aarch64) and also runs natively on Windows. Open it on your phone on the LAN.
+A personal, mobile-first web toolbox. It runs natively on Windows (where it is tested first, next to the graphics
+card) and on a small ARM Linux board (target: LubanCat 5, RK3588, Ubuntu 20.04 aarch64). Open it on your phone on
+the LAN. Local models (faster-whisper-turbo, IndexTTS 2.5, the MMS forced aligner) run as separate
+[model services](services/README.md) on the Windows PC, so later the board can run the app and use the PC as its
+compute node.
 
 | Category | Tools |
 | --- | --- |
-| Digital avatar | **Avatar PiP**: lip-sync a digital avatar to your vlog voice (or to a typed script read by an AI voice) with Duix, add reviewed subtitles, and composite it picture-in-picture onto iPhone footage (portrait or landscape, HDR or SDR) for YouTube Shorts |
-| Video & speech | Video on-screen text OCR (TXT / timed SRT, optional AI clean-up) · Speech to text with local faster-whisper or the AI API (TXT/SRT/VTT/JSON, AI fix / translate / bilingual) |
+| Digital avatar | **Avatar PiP**: lip-sync a digital avatar to your vlog voice (or to a typed script spoken in your cloned voice by IndexTTS 2.5, or by an OpenAI voice) with Duix, add reviewed subtitles (MMS-aligned script or faster-whisper), and composite it picture-in-picture onto iPhone footage (portrait or landscape, HDR or SDR) for YouTube Shorts |
+| Voice | **Text to speech / voice clone** (IndexTTS 2.5: voice sample library, 5 languages, emotion by sample / sliders / text, speech length; or OpenAI voices), optional aligned SRT |
+| Video & speech | Video on-screen text OCR (TXT / timed SRT, optional AI clean-up) · **Speech to text** with faster-whisper-turbo on the GPU PC, faster-whisper on this computer, or the AI API (TXT/SRT/VTT/JSON, AI fix / translate / bilingual) · **Time a script to speech** (MMS forced alignment of a .txt/.srt to a recording) |
 | PDF | Extract text + images (OCR fallback) · Merge · Split · PDF → images · Images (incl. HEIC) → PDF · Compress |
 | Media | Extract audio · Media info (resolution, orientation, rotation, HDR, codecs) |
 
@@ -25,7 +29,18 @@ added as one more module (see [Adding a tool](#adding-a-tool)).
                             │                     light (2)  quick jobs
                             ├─ /api/events     Server-Sent Events: live progress on every open page
                             └─ data/           uploads · outputs · libraries · prefs.json · jobs.json
+                                    │
+                                    │ HTTP (LAN or localhost)
+                                    ▼
+   Windows PC with the GPU ── Duix.Avatar Docker :8383   lip-sync
+                            ├─ whisper  :8391           faster-whisper-turbo      speech → text
+                            ├─ indextts :8392           IndexTTS 2.5              text + voice sample → speech
+                            └─ aligner  :8393           MMS-300m forced aligner   speech + script → timings
 ```
+
+* Each model service is its own process and Python environment ([services/README.md](services/README.md)), with
+  `/health`, `/load`, `/unload`, one work endpoint and a `--test` command-line mode. The app sends the model folder
+  from its settings with every request, so the services need no configuration of their own.
 
 * External programs run through `asyncio.create_subprocess_exec` and Python CPU work through `asyncio.to_thread`,
   so the loop never blocks. Cancelling a job kills its ffmpeg/tesseract process.
@@ -101,6 +116,33 @@ x264 preset · encoder (libx264, `h264_rkmpp`, `h264_v4l2m2m`).
 * Masks, borders and shadows are drawn once with Pillow and merged with `alphamerge`. The reference script's per-pixel
   `geq` mask was far too slow on ARM.
 
+## Local models on the Windows PC (Admin → Model services)
+
+| Service | Default address (app on Windows / on the board) | Default model folder |
+| --- | --- | --- |
+| Speech recognition · faster-whisper | `http://127.0.0.1:8391` / `http://192.168.8.106:8391` | `C:\Users\Administrator\Models\faster-whisper-turbo` |
+| Voice cloning · IndexTTS 2.5 | `http://127.0.0.1:8392` / `http://192.168.8.106:8392` | `C:\Users\Administrator\Models\IndexTTS-2.5` |
+| Forced alignment · MMS | `http://127.0.0.1:8393` / `http://192.168.8.106:8393` | `C:\Users\Administrator\Models\mms-300m-1130-forced-aligner` |
+
+Per service you can set the address, the **model folder on the PC**, the device (auto / GPU / CPU) and, for Whisper,
+precision and beam size, or bf16 for IndexTTS. **Check** lists every required model file with ✓/✗ and its size, the GPU
+and its free memory, and whether the model is loaded. **Load model** / **Unload** warm it up or free the GPU. Engine
+choices: speech recognition (auto = GPU PC → this computer → AI API), voice synthesis (IndexTTS / OpenAI) and script
+timing (auto = MMS if reachable, else speech recognition). An optional **service token** protects the services on the
+LAN. *Free GPU memory before Duix renders* unloads IndexTTS after speaking.
+
+Install and start them on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File services\install.ps1
+powershell -ExecutionPolicy Bypass -File services\start.ps1
+```
+
+Each one can be tested alone: from its tool (*Speech to text* with engine *GPU PC*, *Text to speech / voice clone*,
+*Time a script to speech*), from `http://127.0.0.1:839x/health`, or without any web server with `--test` (see
+[services/README.md](services/README.md)). Your IndexTTS-2.5 folder has an empty `qwen0.6bemo4-merge\`, so only
+*Emotion → Detect from the text* is unavailable until that model is downloaded; Check says so.
+
 ## AI model (LLM & speech) and subtitles
 
 Admin → **AI model** configures one OpenAI-compatible API (default: OpenAI):
@@ -112,16 +154,17 @@ Admin → **AI model** configures one OpenAI-compatible API (default: OpenAI):
 | Model | **Load models** fetches `GET /models`; pick one or type any id (e.g. a new model such as `gpt-6-luna`) |
 | Reasoning effort | model default, none, minimal, low, medium, high, **xhigh**. It is dropped automatically when a model rejects it |
 | Speech | transcription model (`whisper-1`, needs timestamps), TTS model (`gpt-4o-mini-tts`) and default voice |
-| Recognition engine for subtitles | auto (local faster-whisper if installed, else the API) / local / API |
 
 **Test connection** sends a one-word prompt and shows the reply, model, effort and latency.
 
 ### Subtitles in the avatar flow
 
-1. **Input as text:** type a **script**. With *Voice → Type a script (AI voice)* the script is spoken by the TTS
-   model and drives the lip-sync. With your own recorded voice, the script is used as the exact subtitle text.
-2. **Draft:** subtitle text comes from your script (timed against the recognised speech, so lines appear when they
-   are said) or from speech recognition. **AI editing** can fix recognition errors and punctuation, translate, or make
+1. **Input as text:** type a **script**. With *Voice → Type a script (synthesized voice)* the script is spoken by
+   **IndexTTS 2.5 in a cloned voice** (sample: the base model video's own voice, a *Voice samples* library item, or
+   your main video; language, emotion and speech length are adjustable) or by an OpenAI voice, and drives the
+   lip-sync. With your own recorded voice, the script is used as the exact subtitle text.
+2. **Draft:** subtitle text comes from your script, timed to the voice by **MMS forced alignment** (falls back to
+   timing against recognised speech when the aligner is offline), or from **faster-whisper** speech recognition. **AI editing** can fix recognition errors and punctuation, translate, or make
    bilingual subtitles. A *Names & terms* field keeps spellings right.
 3. **Review:** the job pauses in a **Review** state, and the page shows "subtitles ready for review". Meanwhile Duix
    keeps rendering on the PC. In the editor you can change text and timing, insert/merge/delete lines, edit raw SRT,
@@ -152,11 +195,16 @@ Open `http://<board-ip>:8080` on your iPhone and use *Share → Add to Home Scre
 
 Run manually: `.venv/bin/python -m mywebtools` (settings come from `.env`, see `.env.example`).
 
-### Run on Windows instead
+### Run on Windows (current setup)
 
-`deploy\windows\run-mywebtools.ps1` creates a venv and starts the server. When it runs on the Duix PC itself, it uses
-`C:\AI\Duix\data\face2face\temp` directly, so no share is needed. ffmpeg has to be on PATH
-(`winget install Gyan.FFmpeg`). For OCR, install Tesseract (UB Mannheim build) as well.
+`deploy\windows\run-mywebtools.ps1` creates a venv and starts the server on `http://<pc-ip>:8080`. On the Duix PC it
+uses `C:\AI\Duix\data\face2face\temp` directly (no share needed) and the model services on `127.0.0.1`. ffmpeg
+has to be on PATH (`winget install Gyan.FFmpeg`); for OCR install Tesseract (UB Mannheim build). Start the model
+services first (`services\start.ps1`).
+
+Moving the app to the board later: run `deploy/install.sh` there, keep the services running on the PC (started with
+the default `-BindHost 0.0.0.0`, firewall rule from `services\install.ps1`), and the board's defaults already point at
+`http://192.168.8.106:839x`.
 
 ### Hardware video encoding (optional)
 
@@ -213,7 +261,8 @@ Add `tool.nb_to_pdf.*` keys to `zh-CN.json`.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # ffmpeg-based composite tests run when ffmpeg is installed
+pytest            # ffmpeg-based composite tests run when ffmpeg is installed; the model services are
+                  # tested with stand-in models (no torch / GPU needed)
 ruff check .
 ```
 
@@ -225,7 +274,7 @@ API docs: `http://<host>:8080/api/docs`.
 
 ## Notes
 
-* Secrets (`APP_PASSWORD`, `LLM_API_KEY`, optional `DUIX_API_KEY`) are only stored in `.env` (mode 600), never in
-  the repo or `settings.json`.
+* Secrets (`APP_PASSWORD`, `LLM_API_KEY`, `NODE_TOKEN`, optional `DUIX_API_KEY`) are only stored in `.env` (mode
+  600), never in the repo or `settings.json`.
 * Results are kept for 7 days and unused uploads for 24 h (Admin → Settings). Metadata such as iPhone GPS tags is
   stripped from composited videos.

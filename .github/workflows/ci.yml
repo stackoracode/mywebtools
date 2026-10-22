@@ -72,3 +72,18 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest -v
+      - name: Model services start (command line)
+        run: |
+          python services/whisper/server.py --help
+          python services/indextts/server.py --help
+          python services/aligner/server.py --help
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 deploy, services | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            foreach ($e in $errors) { Write-Host "$($_.Name):$($e.Extent.StartLineNumber) $($e.Message)"; $bad++ }
+          }
+          exit $bad

@@ -1,0 +1,4 @@
+# Added on top of the IndexTTS checkout's own environment (uv sync in C:\AI\index-tts).
+fastapi>=0.115
+uvicorn>=0.29
+python-multipart>=0.0.9

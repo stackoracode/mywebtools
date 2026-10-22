@@ -24,7 +24,10 @@ ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = Path(os.getenv("MWT_ENV_FILE", str(ROOT / ".env")))
 load_dotenv(ENV_FILE)
 
-SECRET_KEYS = ("DUIX_API_KEY", "APP_PASSWORD", "LLM_API_KEY")
+SECRET_KEYS = ("DUIX_API_KEY", "APP_PASSWORD", "LLM_API_KEY", "NODE_TOKEN")
+# The GPU PC with the model services (services/): this PC when running on Windows,
+# else the Windows PC in the LAN (the same one that runs Duix).
+NODE_HOST = "127.0.0.1" if os.name == "nt" else "192.168.8.106"
 
 
 def _env(name: str, default: str = "") -> str:
@@ -86,10 +89,29 @@ class Runtime:
     llm_transcribe_model: str = "whisper-1"  # needs segment timestamps for subtitles
     llm_tts_model: str = "gpt-4o-mini-tts"
     llm_tts_voice: str = "alloy"
-    # speech recognition used for subtitles: auto = local faster-whisper if installed, else the API
-    asr_engine: str = "auto"  # auto | local | api
-    whisper_model: str = "base"
+    # Speech engines. auto = the model service on the GPU PC, falling back to local
+    # faster-whisper (if installed) and then the AI API.
+    asr_engine: str = "auto"  # auto | node | local | api
+    whisper_model: str = "base"  # local engine (this computer): name or model folder
+    tts_engine: str = "indextts"  # indextts (voice clone on the GPU PC) | openai
+    align_engine: str = "auto"  # auto | mms (forced alignment on the GPU PC) | basic
     subtitle_font: str = "Noto Sans CJK SC"
+
+    # Model services on the GPU PC (services/README.md). Model folders are paths on *that* PC.
+    node_whisper_url: str = f"http://{NODE_HOST}:8391"
+    node_tts_url: str = f"http://{NODE_HOST}:8392"
+    node_align_url: str = f"http://{NODE_HOST}:8393"
+    node_timeout_seconds: int = 1800
+    node_free_vram: bool = True  # unload the voice model before Duix renders on the same GPU
+    whisper_model_dir: str = r"C:\Users\Administrator\Models\faster-whisper-turbo"
+    whisper_device: str = "auto"  # auto | cuda | cpu
+    whisper_compute_type: str = "auto"  # auto (float16 on GPU, int8 on CPU) | float16 | int8_float16 | int8
+    whisper_beam_size: int = 5
+    indextts_model_dir: str = r"C:\Users\Administrator\Models\IndexTTS-2.5"
+    indextts_device: str = "auto"
+    indextts_bf16: bool = True
+    mms_model_dir: str = r"C:\Users\Administrator\Models\mms-300m-1130-forced-aligner"
+    mms_device: str = "auto"
 
     def duix_share(self) -> Path:
         if self.duix_share_path:

@@ -1,8 +1,11 @@
 """Digital avatar picture-in-picture for vertical vlogs (YouTube Shorts).
 
 Pipeline: iPhone footage (portrait or landscape, HDR or SDR)
-  -> voice track (from the footage or a separate file, optionally trimmed)
+  -> voice track (from the footage, a separate file, or a typed script spoken by
+     IndexTTS 2.5 in a cloned voice / an OpenAI voice)
   -> DUIX lip-syncs the chosen *base model video* to that voice
+  -> subtitles: the script timed by MMS forced alignment, or faster-whisper speech
+     recognition (both on the GPU PC), reviewed while Duix renders
   -> the talking clip is masked/bordered and overlaid onto the footage.
 
 Re-compositing an already generated clip ("Existing clip") costs no credits,
@@ -18,7 +21,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from .. import composite, duix, subtitles
+from .. import composite, duix, speech, subtitles
 from ..composite import ANCHORS, SHAPES, Layout, Timing
 from ..config import settings
 from ..errors import ToolError
@@ -36,14 +39,14 @@ from ..media import (
     tonemap_chain,
     video_encoder_args,
 )
+from ..nodes import Node
 from ..storage import new_id
 from ..subtitles import TARGET_LANGUAGES, Cue
 from .base import Group, Param, Tool, file_param, register
 from .video_ocr import VIDEO_ACCEPT
+from .voice import OPENAI_VOICES, check_voice, synthesize_from, tts_language, voice_params
 
 AUDIO_ACCEPT = "audio/*,.wav,.mp3,.m4a,.aac,.flac"
-OPENAI_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
-                 "marin", "cedar"]
 
 
 def _labels(values: list[str]) -> list[list[str]]:
@@ -110,6 +113,7 @@ class AvatarPip(Tool):
     actions = ("check", "preview", "voices")
     groups = [
         Group("source", "Source"),
+        Group("voice", "Voice emotion & delivery", collapsed=True),
         Group("canvas", "Output frame"),
         Group("place", "Avatar position & size"),
         Group("style", "Mask & style"),
@@ -136,7 +140,7 @@ class AvatarPip(Tool):
                   show_if={"avatar_source": "clip"}),
             Param("audio_source", "select", "Voice", default="main", group="source", show_if=duix_only,
                   options=[["main", "Audio of the main video"], ["file", "Separate audio file"],
-                           ["tts", "Type a script (AI voice)"]]),
+                           ["tts", "Type a script (synthesized voice)"]]),
             file_param("audio_file", "Voice audio file", AUDIO_ACCEPT, required=False, group="source",
                        show_if={"audio_source": "file"}),
             Param("audio_start", "number", "Voice from", default=0, min=0, step=0.1, unit="s", group="source",
@@ -144,19 +148,20 @@ class AvatarPip(Tool):
             Param("audio_end", "number", "Voice to", default=0, min=0, step=0.1, unit="s", group="source",
                   show_if={"audio_source": ["main", "file"]}, help="0 = until the end"),
             Param("script", "textarea", "Script", default="", group="source", remember=False,
-                  help="Text the avatar speaks (AI voice) and/or the exact subtitle text."),
-            Param("tts_voice", "text", "AI voice", default="", group="source", show_if={"audio_source": "tts"},
-                  help="Empty = default from Admin → AI model (e.g. alloy, coral, marin)."),
-            Param("tts_instructions", "textarea", "Speaking style", default="", group="source",
-                  show_if={"audio_source": "tts"}, help="e.g. warm and upbeat vlogger, natural pace"),
-            Param("tts_speed", "range", "Speech speed", default=1.0, min=0.5, max=2.0, step=0.05, group="source",
-                  show_if={"audio_source": "tts"}),
+                  help="Text the avatar speaks (synthesized voice) and/or the exact subtitle text."),
+            *voice_params("source", [["model", "Voice of the base model video"], ["library", "Voice library sample"],
+                                     ["main", "Voice in my main video"]],
+                          when={"audio_source": "tts"}, emotion_group="voice"),
             Param("credits_info", "info", "", group="source", show_if=duix_only),
             # --- subtitles
             Param("subtitles", "bool", "Add subtitles", default=True, group="subs"),
             Param("sub_source", "select", "Subtitle text from", default="auto", group="subs", show_if={"subtitles": True},
                   options=[["auto", "Auto (script if typed, else speech recognition)"], ["voice", "Speech recognition"],
                            ["script", "My script (timed to the voice)"]]),
+            Param("sub_align", "select", "Script timing", default="auto", group="subs", advanced=True,
+                  show_if={"subtitles": True, "sub_source": ["auto", "script"]},
+                  options=[["auto", "Auto (forced alignment if available)"], ["mms", "MMS forced alignment (GPU PC)"],
+                           ["basic", "Speech recognition + proportional"]]),
             Param("sub_language", "select", "Spoken language", default="auto", group="subs",
                   show_if={"subtitles": True, "sub_source": ["auto", "voice"]},
                   options=[["auto", "Detect automatically"]] + [[c, c] for c in WHISPER_LANGUAGES]),
@@ -369,9 +374,12 @@ class AvatarPip(Tool):
         if params["audio_source"] == "tts":
             ctx.progress(4, "avatar.tts")
             spoken = ctx.workdir / "tts.wav"
-            await subtitles.synthesize(params["script"], spoken, ctx.workdir, voice=params["tts_voice"],
-                                       instructions=params["tts_instructions"], speed=params["tts_speed"])
+            await synthesize_from(ctx, params, params["script"], spoken, {"model": library.path(item), "main": main},
+                                  on_progress=lambda f: ctx.progress(4 + 3 * f, "avatar.tts"))
             await extract_audio(spoken, voice)
+            if params["tts_engine"] == "indextts" and rt.node_free_vram:
+                await Node("tts").unload_quietly()  # give the GPU memory to Duix
+                ctx.log("unloaded the IndexTTS model before lip-sync")
         else:
             source = main if params["audio_source"] == "main" else ctx.input("audio_file")
             if params["audio_source"] == "main" and not minfo.has_audio:
@@ -444,16 +452,14 @@ class AvatarPip(Tool):
             if source == "script":
                 if not script:
                     raise ToolError("subs.no_script")
-                try:
-                    segments = await subtitles.recognize(voice, lang, context)
-                except ToolError as exc:
-                    ctx.log(f"no speech recognition ({exc.code}): spreading the script over the voice")
-                    notes.append("subs.proportional")
-                    segments = []
+                if params["avatar_source"] == "duix" and params["audio_source"] == "tts":
+                    lang = tts_language(params, script)
                 max_chars = style.max_chars or subtitles.auto_max_chars(script, canvas_w, style.size)
-                cues = subtitles.align_script(subtitles.split_script(script, max_chars), segments, duration)
+                cues, _ = await speech.align_script(subtitles.split_script(script, max_chars), voice, duration,
+                                                    language=lang, prompt=context, engine=params["sub_align"],
+                                                    notes=notes, log=ctx.log)
             else:
-                segments = await subtitles.recognize(voice, lang, context)
+                segments = await speech.recognize(voice, lang, context, log=ctx.log)
                 cues = [Cue(s["start"], s["end"], s["text"]) for s in segments]
             mode = params["sub_ai"]
             if mode == "fix" and source == "script":
@@ -570,8 +576,7 @@ class AvatarPip(Tool):
         if params["audio_source"] == "tts":
             if not params["script"].strip():
                 warn("subs.no_script")
-            if not LLM().configured:
-                warn("llm.not_configured")
+            await check_voice(params, warn)
         self._check_subtitles(params, warn)
         return out
 
@@ -580,7 +585,7 @@ class AvatarPip(Tool):
         if not params["subtitles"]:
             return
         try:
-            subtitles.asr_engine()
+            speech.asr_order()
         except ToolError as exc:
             if not (params["sub_source"] == "script" and params["script"].strip()):
                 warn(exc.code)

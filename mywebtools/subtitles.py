@@ -4,23 +4,21 @@ Pipeline used by the avatar tool (and partly by speech-to-text):
 
   voice wav ──ASR──▶ timed segments ─┐
   typed script ──split──▶ sentences ─┴─▶ align ─▶ cues ─▶ (AI fix / translate) ─▶ review ─▶ SRT + burned ASS
+
+The speech engines themselves (recognition, synthesis, forced alignment) are in speech.py.
 """
 
 from __future__ import annotations
 
-import asyncio
-import importlib.util
 import json
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from .config import settings
 from .errors import ToolError
 from .i18n import is_cjk_char
 from .llm import LLM
-from .media import ffmpeg_base, run_cmd
 
 TARGET_LANGUAGES = {
     "en": "English", "zh-Hans": "Simplified Chinese", "zh-Hant": "Traditional Chinese", "ja": "Japanese",
@@ -164,36 +162,13 @@ def align_script(chunks: list[str], segments: list[dict[str, Any]], duration: fl
     return cues
 
 
-# ---------------------------------------------------------------------------
-# speech recognition
-# ---------------------------------------------------------------------------
-def asr_engine() -> str:
-    choice = settings.runtime.asr_engine
-    local_ok = importlib.util.find_spec("faster_whisper") is not None
-    api_ok = LLM().configured
-    if choice == "local" or (choice == "auto" and local_ok):
-        if not local_ok:
-            raise ToolError("dependency.faster_whisper")
-        return "local"
-    if not api_ok:
-        raise ToolError("subs.no_asr")
-    return "api"
-
-
-async def recognize(audio: Path, language: str = "", prompt: str = "") -> list[dict[str, Any]]:
-    lang = None if language in ("", "auto") else language.split("-")[0]
-    if asr_engine() == "api":
-        return await LLM().transcribe(audio, lang, prompt)
-    from .tools.transcribe import _load_model
-
-    model = await asyncio.to_thread(_load_model, settings.runtime.whisper_model)
-
-    def work():
-        segments, _ = model.transcribe(str(audio), language=lang, vad_filter=True, beam_size=2,
-                                       initial_prompt=prompt or None)
-        return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments if s.text.strip()]
-
-    return await asyncio.to_thread(work)
+def tidy_cues(cues: list[Cue], duration: float, *, min_len: float = 0.6, hold: float = 0.25) -> list[Cue]:
+    """Forced-alignment times are tight: hold each line a little longer (into the pause after it),
+    give very short lines a readable minimum, and never overlap the next line."""
+    for i, cue in enumerate(cues):
+        limit = cues[i + 1].start if i + 1 < len(cues) else max(duration, cue.end)
+        cue.end = min(max(cue.end + hold, cue.start + min_len), limit) if limit > cue.start else cue.end
+    return cues
 
 
 # ---------------------------------------------------------------------------
@@ -238,37 +213,6 @@ async def ai_edit(cues: list[Cue], mode: str, *, target: str = "", instruction: 
             text = str(text).strip() or cue.text
             out.append(Cue(cue.start, cue.end, f"{cue.text}\n{text}" if mode == "bilingual" else text))
     return out
-
-
-# ---------------------------------------------------------------------------
-# text to speech (long scripts are spoken in chunks and concatenated)
-# ---------------------------------------------------------------------------
-async def synthesize(script: str, dest: Path, workdir: Path, *, voice: str = "", instructions: str = "",
-                     speed: float = 1.0, max_chars: int = 3000) -> Path:
-    script = script.strip()
-    if not script:
-        raise ToolError("subs.no_script")
-    chunks, current = [], ""
-    for sentence in _SENTENCE_END.split(script):
-        sentence = (sentence or "").strip()
-        if current and len(current) + len(sentence) + 1 > max_chars:
-            chunks.append(current)
-            current = ""
-        current = f"{current} {sentence}".strip() if cjk_ratio(sentence) <= 0.3 else current + sentence
-    if current:
-        chunks.append(current)
-    llm = LLM()
-    parts = []
-    for n, chunk in enumerate(chunks):
-        parts.append(await llm.speech(chunk, workdir / f"tts_{n:03d}.wav", voice=voice, instructions=instructions,
-                                      speed=speed))
-    if len(parts) == 1:
-        parts[0].replace(dest)
-        return dest
-    inputs = [arg for p in parts for arg in ("-i", str(p))]
-    graph = "".join(f"[{i}:a]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1[a]"
-    await run_cmd(ffmpeg_base() + inputs + ["-filter_complex", graph, "-map", "[a]", str(dest)])
-    return dest
 
 
 # ---------------------------------------------------------------------------
