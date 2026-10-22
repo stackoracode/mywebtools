@@ -372,7 +372,7 @@
  "err.node.not_configured": "The {service} service has no address (Admin → Model services)",
  "err.node.offline": "The {service} service on the GPU PC is not reachable ({url}). Start it with services\\start.ps1",
  "err.node.timeout": "The {service} service did not answer in time",
- "err.node.failed": "The {service} service failed ({code})",
+ "err.node.failed": "The {service} service failed ({remote_code})",
  "err.node.model_missing": "Model folder not found on the GPU PC",
  "err.node.model_outside_root": "The model folder is outside the service's models folder (--models-root)",
  "err.node.files_missing": "Model files are missing on the GPU PC (Admin → Model services → Check)",

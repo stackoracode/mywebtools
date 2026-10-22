@@ -755,7 +755,7 @@
  "err.node.not_configured": "{service} 服务未设置地址（管理 → 模型服务）",
  "err.node.offline": "无法连接 GPU 电脑上的 {service} 服务（{url}）。请用 services\\start.ps1 启动",
  "err.node.timeout": "{service} 服务响应超时",
- "err.node.failed": "{service} 服务出错（{code}）",
+ "err.node.failed": "{service} 服务出错（{remote_code}）",
  "err.node.model_missing": "GPU 电脑上找不到模型文件夹",
  "err.node.model_outside_root": "模型文件夹不在服务允许的模型目录内（--models-root）",
  "err.node.files_missing": "GPU 电脑上缺少模型文件（管理 → 模型服务 → 检查）",

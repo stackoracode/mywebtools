@@ -63,7 +63,7 @@ class Node:
     def _error(self, code: str, detail: str) -> ToolError:
         if code in KNOWN:
             return ToolError(f"node.{code}", detail[:500], service=self.kind)
-        return ToolError("node.failed", detail[:500], service=self.kind, code=code)
+        return ToolError("node.failed", detail[:500], service=self.kind, remote_code=code)
 
     async def _post(self, path: str, *, timeout: float | None = None, **kw: Any) -> httpx.Response:
         if not self.configured:
